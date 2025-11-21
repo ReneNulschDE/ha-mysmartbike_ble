@@ -1,6 +1,5 @@
 # MySmartBike BLE Integration for Home Assistant
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub release](https://img.shields.io/github/release/renenulschde/ha-mysmartbike-ble.svg)](https://github.com/renenulschde/ha-mysmartbike-ble/releases)
 
 Home Assistant custom component for E-Bikes with Mahle SmartBike systems (X25, X35+, ebikemotion, ...) via Bluetooth Low Energy (BLE).
