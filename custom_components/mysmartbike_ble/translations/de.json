@@ -29,10 +29,7 @@
   "entity": {
     "switch": {
       "connection": {
-        "name": "Verbindung",
-        "state_attributes": {
-          "description": "Bluetooth-Verbindung zum E-Bike. WARNUNG: Beim Ausschalten schaltet sich das Rad nach ca. 5 Minuten ab und muss manuell wieder eingeschaltet oder an den Strom angeschlossen werden!"
-        }
+        "name": "Verbindung"
       }
     }
   }

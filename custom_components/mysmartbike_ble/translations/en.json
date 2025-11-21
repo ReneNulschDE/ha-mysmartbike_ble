@@ -29,10 +29,7 @@
   "entity": {
     "switch": {
       "connection": {
-        "name": "Connection",
-        "state_attributes": {
-          "description": "Bluetooth connection to the e-bike. WARNING: Turning off will shut down the bike after approximately 5 minutes and it must be manually turned on again or connected to power!"
-        }
+        "name": "Connection"
       }
     }
   }
