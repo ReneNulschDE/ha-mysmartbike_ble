@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![GitHub release](https://img.shields.io/github/release/renenulschde/ha-mysmartbike-ble.svg)](https://github.com/renenulschde/ha-mysmartbike-ble/releases)
 
-Home Assistant custom component for E-Bikes with Mahle SmartBike systems (X35+, ebikemotion) via Bluetooth Low Energy (BLE).
+Home Assistant custom component for E-Bikes with Mahle SmartBike systems (X25, X35+, ebikemotion, ...) via Bluetooth Low Energy (BLE).
 
 Many premium E-Bike brands use Mahle drive systems and the MySmartBike app for connectivity. This integration works with bikes from various manufacturers including Schindelhauer, Orbea, Bianchi, Pinarello, Scott, and others that use the Mahle BLE protocol.
 
@@ -24,7 +24,7 @@ This integration provides real-time monitoring of your E-Bike through Bluetooth 
 ### Connection Control
 
 - **Connection Switch** - Control the BLE connection to your E-Bike
-  - ⚠️ **IMPORTANT WARNING**: Turning off this switch will disconnect from the bike and **the bike will shut down after approximately 5 minutes**. You must manually turn the bike back on or connect it to power to reconnect!
+  - Turning off this switch will disconnect from the bike and **the bike will shut down after approximately 5 minutes**. You must manually turn the bike back on or connect it to power to reconnect!
   - Use this switch to save energy when you don't need active monitoring
   - The bike will automatically turn off about 5 minutes after disconnection to conserve battery
 
@@ -44,7 +44,6 @@ This integration provides real-time monitoring of your E-Bike through Bluetooth 
 - **Odometer** (km)
 - **Range** (km)
 - **Light Status**
-- **EBM Status**
 
 ### Device Information
 The integration automatically retrieves and displays:
@@ -53,8 +52,9 @@ The integration automatically retrieves and displays:
 
 ## Requirements
 
-- Home Assistant 2024.1.0 or newer
+- Home Assistant 2024.1.6 or newer
 - Bluetooth adapter with BLE support
+- Bluetooth proxies with active connections are supported (ex. EspHome) - Shelly is not support as active direct connections are not possible.
 - E-Bike with Mahle SmartBike system (compatible with MySmartBike or ebikemotion app)
 
 ## Installation
@@ -97,7 +97,7 @@ The integration will automatically discover iWoc devices in range via Bluetooth.
 
 - Make sure your E-Bike is turned on and in range
 - Check that Bluetooth is enabled on your Home Assistant host
-- Verify that the device name starts with "iWoc"
+- Verify that the device name starts with "iWoc" (please report other device names)
 
 ### Connection issues
 
@@ -122,21 +122,10 @@ The integration will automatically discover iWoc devices in range via Bluetooth.
   3. Turn on the "Connection" switch in Home Assistant
 - **Use case**: Turn off the connection when you don't need monitoring to save your bike's battery
 
-## Development
-
-This integration is based on the BLE protocol from Mahle SmartBike systems.
 
 ### Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
-### Protocol Documentation
-
-The integration parses the following message types:
-- Battery messages (voltage, SoC, current, temperature)
-- Motor messages (speed, power, torque, assist level)
-- EBM messages (odometer, range, light status)
-- Assist level messages
 
 ## License
 
