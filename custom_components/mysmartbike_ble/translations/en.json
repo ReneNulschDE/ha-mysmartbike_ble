@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Do you want to add the MySmartBike device {name} to Home Assistant?"
+      },
+      "user": {
+        "data": {
+          "address": "Device"
+        },
+        "description": "Select your MySmartBike device"
+      }
+    },
+    "abort": {
+      "already_configured": "Device is already configured",
+      "no_devices_found": "No MySmartBike devices found. Make sure your device is turned on and in range."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "log_ble_messages": "Save BLE messages to file"
+        },
+        "description": "Advanced settings for MySmartBike BLE"
+      }
+    }
+  },
+  "entity": {
+    "switch": {
+      "connection": {
+        "name": "Connection",
+        "state_attributes": {
+          "description": "Bluetooth connection to the e-bike. WARNING: Turning off will shut down the bike after approximately 5 minutes and it must be manually turned on again or connected to power!"
+        }
+      }
+    }
+  }
+}

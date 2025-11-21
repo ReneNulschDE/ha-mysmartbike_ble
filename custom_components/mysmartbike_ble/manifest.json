@@ -1,0 +1,17 @@
+{
+  "domain": "mysmartbike_ble",
+  "name": "MySmartBike BLE",
+  "codeowners": ["@renenulschde"],
+  "config_flow": true,
+  "documentation": "https://github.com/renenulschde/ha-mysmartbike-ble",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "requirements": ["bleak>=0.21.0", "bleak-retry-connector>=3.1.0"],
+  "version": "0.0.0",
+  "homeassistant": "2024.6.0",
+  "bluetooth": [
+    {
+      "local_name": "iWoc*"
+    }
+  ]
+}

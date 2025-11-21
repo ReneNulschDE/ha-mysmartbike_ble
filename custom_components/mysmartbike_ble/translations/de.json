@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Möchten Sie das MySmartBike-Gerät {name} zu Home Assistant hinzufügen?"
+      },
+      "user": {
+        "data": {
+          "address": "Gerät"
+        },
+        "description": "Wählen Sie Ihr MySmartBike-Gerät aus"
+      }
+    },
+    "abort": {
+      "already_configured": "Gerät ist bereits konfiguriert",
+      "no_devices_found": "Keine MySmartBike-Geräte gefunden. Stellen Sie sicher, dass Ihr Gerät eingeschaltet und in Reichweite ist."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "log_ble_messages": "BLE-Nachrichten in Datei speichern"
+        },
+        "description": "Erweiterte Einstellungen für MySmartBike BLE"
+      }
+    }
+  },
+  "entity": {
+    "switch": {
+      "connection": {
+        "name": "Verbindung",
+        "state_attributes": {
+          "description": "Bluetooth-Verbindung zum E-Bike. WARNUNG: Beim Ausschalten schaltet sich das Rad nach ca. 5 Minuten ab und muss manuell wieder eingeschaltet oder an den Strom angeschlossen werden!"
+        }
+      }
+    }
+  }
+}

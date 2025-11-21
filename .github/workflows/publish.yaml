@@ -1,0 +1,39 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    name: Publish release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get integration name
+        id: get_integration_name
+        run: |
+          integration_name=$(ls custom_components)
+          echo "integration_name=$integration_name" >> $GITHUB_OUTPUT
+
+      - name: Adjust version number
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          yq -i -o json '.version="${{ github.ref_name }}"' custom_components/${{ steps.get_integration_name.outputs.integration_name }}/manifest.json
+
+      - name: Create zip
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          cd custom_components/${{ steps.get_integration_name.outputs.integration_name }}
+          zip ${{ steps.get_integration_name.outputs.integration_name }}.zip -r ./
+
+      - name: Upload zip to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: custom_components/${{ steps.get_integration_name.outputs.integration_name }}/${{ steps.get_integration_name.outputs.integration_name }}.zip
+          tag_name: ${{ github.ref_name }}
