@@ -1,7 +1,7 @@
 # MySmartBike BLE Integration for Home Assistant
 
 [![GitHub release](https://img.shields.io/github/release/renenulschde/ha-mysmartbike_ble.svg)](https://github.com/renenulschde/ha-mysmartbike_ble/releases)
-![](https://img.shields.io/github/downloads/renenulschde/ha-mysmartbike_ble/latest/total)
+![](https://img.shields.io/github/downloads/renenulschde/ha-mysmartbike_ble/latest/total) ![Validate with HACS](https://github.com/ReneNulschDE/mbapi2020/workflows/Validate%20with%20HACS/badge.svg) 
 ![HassFest tests](https://github.com/renenulschde/ha-mysmartbike_ble/workflows/Validate%20with%20hassfest/badge.svg) 
 
 
