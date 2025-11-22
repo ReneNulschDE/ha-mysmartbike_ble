@@ -22,10 +22,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up MySmartBike BLE switch entities."""
-    _LOGGER.debug("Setting up switch platform for entry_id: %s", entry.entry_id)
     coordinator: MySmartBikeCoordinator = entry.runtime_data
-
-    _LOGGER.debug("Adding connection switch entity (coordinator.is_connected: %s)", coordinator.is_connected)
     async_add_entities([MySmartBikeConnectionSwitch(coordinator, entry)])
 
 
@@ -51,25 +48,11 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
         if coordinator.protocol_version:
             self._attr_device_info["sw_version"] = coordinator.protocol_version
         self._attr_translation_key = "connection"
-        _LOGGER.debug(
-            "Switch initialized: unique_id=%s, coordinator.is_connected=%s",
-            self._attr_unique_id,
-            coordinator.is_connected,
-        )
 
     @property
     def is_on(self) -> bool:
         """Return True if connection is desired (not manually disconnected)."""
-        # Switch represents the desired state, not the actual connection status
-        # If manual_disconnect is False, user wants to be connected
-        state = not self.coordinator._manual_disconnect
-        _LOGGER.debug(
-            "Switch is_on property called: returning %s (manual_disconnect=%s, is_connected=%s)",
-            state,
-            self.coordinator._manual_disconnect,
-            self.coordinator.is_connected
-        )
-        return state
+        return not self.coordinator._manual_disconnect
 
     @property
     def icon(self) -> str:
@@ -78,32 +61,16 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch - request connection to the bike."""
-        _LOGGER.debug(
-            "Switch.async_turn_on called (current coordinator.is_connected: %s, manual_disconnect: %s)",
-            self.coordinator.is_connected,
-            self.coordinator._manual_disconnect,
-        )
-
-        # Update state immediately - switch is now ON (connection desired)
         self.async_write_ha_state()
 
         try:
             await self.coordinator.async_reconnect()
-            _LOGGER.debug(
-                "Switch.async_turn_on: reconnect completed (coordinator.is_connected: %s)",
-                self.coordinator.is_connected,
-            )
         except Exception as ex:
-            # Provide user-friendly error message
-            error_msg = str(ex)
-            if "not reachable" in error_msg.lower():
-                _LOGGER.warning(
-                    "Switch.async_turn_on: Cannot connect now - bike is not reachable. "
-                    "Will auto-connect when bike is powered on."
-                )
+            error_msg = str(ex).lower()
+            if "not reachable" in error_msg:
+                _LOGGER.warning("Cannot connect - bike not reachable. Will auto-connect when available.")
             else:
-                _LOGGER.error("Switch.async_turn_on: Failed to connect to bike: %s", ex, exc_info=True)
-            # Switch stays ON - coordinator will auto-reconnect when bike becomes available
+                _LOGGER.error("Failed to connect to bike: %s", ex)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch - disconnect from the bike.
@@ -111,19 +78,9 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
         WARNING: This will turn off the bike after ~5 minutes! It must be manually
         turned on again or connected to power.
         """
-        _LOGGER.warning(
-            "Switch.async_turn_off called - Disconnecting from bike (current coordinator.is_connected: %s). "
-            "Bike will turn off after approximately 5 minutes and must be manually turned on again or connected to power",
-            self.coordinator.is_connected,
-        )
+        _LOGGER.warning("Disconnecting from bike - it will turn off after ~5 minutes")
         try:
             await self.coordinator.async_disconnect()
-            _LOGGER.debug(
-                "Switch.async_turn_off: disconnect completed (coordinator.is_connected: %s, manual_disconnect: %s)",
-                self.coordinator.is_connected,
-                self.coordinator._manual_disconnect,
-            )
             self.async_write_ha_state()
-            _LOGGER.debug("Switch.async_turn_off: state written to HA")
         except Exception as ex:
-            _LOGGER.error("Switch.async_turn_off: Failed to disconnect from bike: %s", ex, exc_info=True)
+            _LOGGER.error("Failed to disconnect from bike: %s", ex)
