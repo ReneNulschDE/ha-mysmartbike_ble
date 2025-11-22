@@ -15,7 +15,9 @@ This integration has been developed and tested with:
 
 | Brand | Model | Status |
 |-------|-------|--------|
+| Orbea | Vibe | Fully tested |
 | Schindelhauer | Arthur IX | Fully tested |
+
 
 **Your bike not listed?** If you have an E-Bike that uses the MySmartBike app (or ebikemotion app), it will likely work with this integration. Please open an issue to report compatibility!
 
