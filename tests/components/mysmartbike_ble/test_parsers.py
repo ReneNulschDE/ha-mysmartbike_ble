@@ -205,44 +205,53 @@ class TestMotorParserX20:
 
 
 class TestEbmParserX20:
-    """20-byte EBM frame parsing (X20 / HUS-prefixed devices)."""
+    """20-byte EBM frame parsing (X20 / HUS-prefixed devices).
 
-    # Real frame: odometer 0x000A0502 / 10000 = 65.7 km, autonomy 0x5C00 / 1000 = 23.55 km,
-    # byte 13 = 0xFF (lights flag != 1 → off), byte 14 = 0x01 status, then 'HIJ' marker.
-    EBM_MESSAGE = bytes.fromhex("246a245a23000a05025c000002ff0148494a2340")
+    Field offsets verified against an app-confirmed capture:
+    - Odometer 0x000084 / 10 = 13.2 km  (app shows 8.08 mi = 13.005 km)
+    - Range    0x02E1   / 10 = 73.7 km  (app shows 45 mi   = 72.42 km)
+    """
+
+    # Slot 1 frame = lifetime values
+    EBM_LIFETIME = bytes.fromhex("246a245a2300008402e1000001f50148494a2340")
+    # Slot 2 frame = trip values; same bike, same odometer/autonomy bytes →
+    # trip A == lifetime (no reset since first ride).
+    EBM_TRIP = bytes.fromhex("246a245a2300008402e1000001f50248494a2340")
 
     def test_message_length(self):
-        assert len(self.EBM_MESSAGE) == 20
+        assert len(self.EBM_LIFETIME) == 20
 
     def test_recognition(self):
         parser = BikeDataParser()
-        assert parser.recognize_message_type(self.EBM_MESSAGE) == "ebm"
+        assert parser.recognize_message_type(self.EBM_LIFETIME) == "ebm"
 
-    def test_odometer(self):
+    def test_lifetime_odometer(self):
+        """Odometer is a 24-bit field at offset 5 with /10 km scaling."""
         parser = BikeDataParser()
-        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+        result = parser.parse_ebm_message(self.EBM_LIFETIME)
 
-        # 0x000A0502 / 10000 = 65.7
-        assert abs(result["odometry"] - 65.7) < 0.1
+        # 0x000084 / 10 = 13.2 km (app: 8.08 mi = 13.005 km)
+        assert abs(result["odometry"] - 13.2) < 0.05
 
-    def test_autonomy_uses_16bit_decode(self):
-        """Regression: a 32-bit decode at offset 9 yields ~154 000 km."""
+    def test_lifetime_autonomy(self):
+        """Range is a 16-bit field at offset 8 with /10 km scaling."""
         parser = BikeDataParser()
-        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+        result = parser.parse_ebm_message(self.EBM_LIFETIME)
 
-        # 0x5C00 / 1000 = 23.552 km
-        assert 20.0 < result["autonomy"] < 30.0
+        # 0x02E1 / 10 = 73.7 km (app: 45 mi = 72.42 km)
+        assert abs(result["autonomy"] - 73.7) < 0.05
 
-    def test_lights_off_when_byte13_is_ff(self):
-        """0xFF is observed alongside 0x00; only 0x01 maps to lights on."""
+    def test_lights_off_at_offset_10(self):
+        """Lights flag moved from offset 13 to offset 10 in the X20 layout."""
         parser = BikeDataParser()
-        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+        result = parser.parse_ebm_message(self.EBM_LIFETIME)
 
+        # message[10] = 0x00 → off
         assert result["is_light_on"] is False
 
     def test_lights_on(self):
-        msg = bytearray(self.EBM_MESSAGE)
-        msg[13] = 0x01
+        msg = bytearray(self.EBM_LIFETIME)
+        msg[10] = 0x01
 
         parser = BikeDataParser()
         result = parser.parse_ebm_message(bytes(msg))
@@ -250,10 +259,52 @@ class TestEbmParserX20:
         assert result["is_light_on"] is True
 
     def test_status_byte(self):
+        """Status moved from offset 14 to offset 11."""
         parser = BikeDataParser()
-        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+        result = parser.parse_ebm_message(self.EBM_LIFETIME)
 
-        assert result["status"] == 0x01
+        # message[11] = 0x00
+        assert result["status"] == 0
+
+    def test_accelerometer_axes(self):
+        """Bytes 12-13 carry accelerometer Z/Y as signed bytes."""
+        parser = BikeDataParser()
+        result = parser.parse_ebm_message(self.EBM_LIFETIME)
+
+        # message[12] = 0x01, message[13] = 0xF5 (signed = -11)
+        assert result["accel_z"] == 1
+        assert result["accel_y"] == -11
+
+    def test_slot_2_updates_trip_only(self):
+        """Slot 2 frames carry trip A values; lifetime fields stay at previous."""
+        parser = BikeDataParser()
+        # First ingest a slot 1 frame so we have a previous lifetime
+        parser.parse_ebm_message(self.EBM_LIFETIME)
+        prev_odo = parser.state["ebm"]["odometry"]
+
+        # Now a slot 2 frame with different bytes (mock a real trip distance)
+        msg = bytearray(self.EBM_TRIP)
+        # Set trip odometer to 0x000050 = 80 → 8.0 km
+        msg[5], msg[6], msg[7] = 0x00, 0x00, 0x50
+        result = parser.parse_ebm_message(bytes(msg))
+
+        assert result["trip_odometry"] == 8.0
+        assert result["odometry"] == prev_odo  # lifetime preserved
+
+    def test_slot_1_updates_lifetime_preserves_trip(self):
+        """A slot 1 frame must not clobber the previously seen trip values."""
+        parser = BikeDataParser()
+        # First a slot 2 frame to populate trip_*
+        msg2 = bytearray(self.EBM_TRIP)
+        msg2[5], msg2[6], msg2[7] = 0x00, 0x00, 0x50  # trip = 8.0 km
+        parser.parse_ebm_message(bytes(msg2))
+        assert parser.state["ebm"]["trip_odometry"] == 8.0
+
+        # Now a slot 1 frame
+        result = parser.parse_ebm_message(self.EBM_LIFETIME)
+
+        assert result["trip_odometry"] == 8.0  # preserved
+        assert abs(result["odometry"] - 13.2) < 0.05
 
 
 class TestBatteryParser:

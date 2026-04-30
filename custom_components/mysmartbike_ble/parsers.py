@@ -314,8 +314,12 @@ class BikeDataParser:
         data = {
             "odometry": odometry_km,
             "autonomy": autonomy_km,
+            "trip_odometry": None,
+            "trip_autonomy": None,
             "is_light_on": is_light_on,
             "status": status,
+            "accel_y": None,
+            "accel_z": None,
         }
         self.state["ebm"] = data
         return data
@@ -323,21 +327,47 @@ class BikeDataParser:
     def _parse_ebm_x20(self, message: bytes) -> Optional[Dict[str, Any]]:
         """Parse 20-byte EBM frame (X20 / HUS-prefixed devices).
 
-        Autonomy is a 16-bit field at offset 9 (a 32-bit decode there yields
-        implausible six-digit km values). Bytes 15-17 are a fixed `HIJ` marker.
-        Byte 13 light flag is observed as 0x00 / 0x01 / 0xFF — only 0x01 means on.
-        """
-        odometry_km = read32(message, 5) / 10000.0
-        autonomy_km = read16(message, 9) / 1000.0
-        is_light_on = message[13] == 1
-        status = read_unsigned_byte(message[14])
+        The bike alternates between two slot indicators in byte 14:
+        - slot == 1 → bytes 5-9 carry the LIFETIME odometer & range
+        - slot == 2 → same bytes carry the current TRIP A distance & range
 
-        data = {
-            "odometry": odometry_km,
-            "autonomy": autonomy_km,
-            "is_light_on": is_light_on,
-            "status": status,
-        }
+        Bytes 15-17 are a fixed `HIJ` (`0x48 0x49 0x4A`) marker before `#@`. A
+        device using protocol v200 puts an MPlatform error code and remote-SOC
+        info there instead — not yet supported.
+        """
+        odometry_km = read24(message, 5) / 10.0
+        autonomy_km = read16(message, 8) / 10.0
+        is_light_on = message[10] == 1
+        status = read_unsigned_byte(message[11])
+        accel_z = read_signed_byte(message[12])
+        accel_y = read_signed_byte(message[13])
+        slot = read_unsigned_byte(message[14])
+
+        prev = self.state.get("ebm") or {}
+
+        if slot == 2:
+            data = {
+                "odometry": prev.get("odometry"),
+                "autonomy": prev.get("autonomy"),
+                "trip_odometry": odometry_km,
+                "trip_autonomy": autonomy_km,
+            }
+        else:
+            data = {
+                "odometry": odometry_km,
+                "autonomy": autonomy_km,
+                "trip_odometry": prev.get("trip_odometry"),
+                "trip_autonomy": prev.get("trip_autonomy"),
+            }
+
+        data.update(
+            {
+                "is_light_on": is_light_on,
+                "status": status,
+                "accel_y": accel_y,
+                "accel_z": accel_z,
+            }
+        )
         self.state["ebm"] = data
         return data
 
