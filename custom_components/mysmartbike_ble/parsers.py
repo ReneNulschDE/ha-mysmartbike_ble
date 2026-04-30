@@ -12,12 +12,25 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def read16(data: bytes, offset: int) -> int:
-    """Read 16-bit value from data at offset (big-endian, as per Mahle protocol)."""
+    """Read 16-bit big-endian value from data at offset."""
     return ((data[offset] & 0xFF) << 8) | (data[offset + 1] & 0xFF)
 
 
+def read16_signed(data: bytes, offset: int) -> int:
+    """Read 16-bit big-endian value as signed int."""
+    value = read16(data, offset)
+    if value & 0x8000:
+        value -= 0x10000
+    return value
+
+
+def read_signed_byte(byte_val: int) -> int:
+    """Read byte as signed int."""
+    return byte_val - 256 if byte_val & 0x80 else byte_val
+
+
 def read24(data: bytes, offset: int) -> int:
-    """Read 24-bit value from data at offset (big-endian, as per Mahle protocol)."""
+    """Read 24-bit big-endian value from data at offset."""
     return (
         ((data[offset] & 0xFF) << 16)
         | ((data[offset + 1] & 0xFF) << 8)
@@ -26,7 +39,7 @@ def read24(data: bytes, offset: int) -> int:
 
 
 def read32(data: bytes, offset: int) -> int:
-    """Read 32-bit value from data at offset (big-endian, as per Mahle protocol)."""
+    """Read 32-bit big-endian value from data at offset."""
     return (
         ((data[offset] & 0xFF) << 24)
         | ((data[offset + 1] & 0xFF) << 16)
@@ -57,11 +70,15 @@ class BikeDataParser:
         self.protocol_version: Optional[str] = None
 
     def parse_battery_message(self, message: bytes) -> Optional[Dict[str, Any]]:
-        """Parse battery message and update state."""
-        if len(message) < BATTERY_MESSAGE_LENGTH:
-            return None
+        """Parse battery frame; dispatch by length to the right layout."""
+        if len(message) == 20:
+            return self._parse_battery_x20(message)
+        if len(message) >= BATTERY_MESSAGE_LENGTH:
+            return self._parse_battery_ebm(message)
+        return None
 
-        # Read values
+    def _parse_battery_ebm(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse 19-byte battery frame (X25 / X35+ / ebikemotion)."""
         voltage = read16(message, 5) / 10.0
         soc = read_unsigned_byte(message[7])
         temp_status = message[8]
@@ -69,66 +86,102 @@ class BikeDataParser:
         nominal_capacity = read16(message, 11) / 10.0
         remaining_wh = read16(message, 13) / 10.0
 
-        # Get battery number and cycles from combined field at offset 15
-        # Format: value = (battery_number * 10000) + cycles
-        # e.g., 10036 means battery 1, 36 cycles
         combined_raw = read16(message, 15) if len(message) >= 19 else None
         battery_number = (combined_raw // 10000) if combined_raw else 1
         cycles = (combined_raw % 10000) if combined_raw else None
 
-        # Construct battery data dictionary
         data = {
             "voltage": voltage,
             "soc": soc,
             "temperature": temp_status,
+            "temperature_mos": None,
             "current": current,
             "nominal_capacity": nominal_capacity,
             "remaining_wh": remaining_wh,
             "cycles": cycles,
+            "is_charging": False,
         }
-
-        # Handle secondary vs primary battery
-        if battery_number == 2:
-            # Secondary battery detected
-            self.battery_packet_counter = 0
-            self.state["battery_secondary"] = data
-        elif battery_number == 1:
-            # Primary battery
-            self.battery_packet_counter += 1
-            self.state["battery_primary"] = data
-
-            # After 4 consecutive primary battery packets, reset secondary battery
-            if self.battery_packet_counter >= 4:
-                self.state["battery_secondary"] = {
-                    "voltage": 0.0,
-                    "soc": 0.0,
-                    "temperature": 0,
-                    "current": 0.0,
-                    "nominal_capacity": 0.0,
-                    "remaining_wh": 0.0,
-                    "cycles": None,
-                }
-
+        self._store_battery(data, battery_number)
         return data
 
-    def parse_motor_message(self, message: bytes) -> Optional[Dict[str, Any]]:
-        """Parse motor message and update state."""
-        if len(message) < MOTOR_MESSAGE_LENGTH:
-            return None
+    def _parse_battery_x20(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse 20-byte battery frame (X20 / HUS-prefixed devices)."""
+        voltage = read16(message, 5) / 100.0
+        soc_raw = read_unsigned_byte(message[7])
+        # Bit 7 of the SOC byte signals charging on the newer firmware variant;
+        # safe to read unconditionally — real SOC is always ≤ 100, so the bit
+        # would never be set by accident on older firmwares.
+        is_charging = bool(soc_raw & 0x80)
+        soc = soc_raw & 0x7F
+        temp_status = read_signed_byte(message[8])
+        current = read16_signed(message, 9) / 10.0
+        nominal_capacity = read16(message, 11) / 10.0
+        remaining_wh = read16(message, 13) / 10.0
+        temperature_mos = read_signed_byte(message[15])
 
-        # Extract values from message
+        combined_raw = read16(message, 16)
+        battery_number = combined_raw // 10000
+        cycles = combined_raw % 10000
+
+        data = {
+            "voltage": voltage,
+            "soc": soc,
+            "temperature": temp_status,
+            "temperature_mos": temperature_mos,
+            "current": current,
+            "nominal_capacity": nominal_capacity,
+            "remaining_wh": remaining_wh,
+            "cycles": cycles,
+            "is_charging": is_charging,
+        }
+        self._store_battery(data, battery_number)
+        return data
+
+    def _store_battery(self, data: Dict[str, Any], battery_number: int) -> None:
+        """Update primary/secondary battery slots and the consecutive-primary counter."""
+        if battery_number == 2:
+            self.battery_packet_counter = 0
+            self.state["battery_secondary"] = data
+            return
+
+        # Anything that isn't an explicit secondary battery (number == 2) is
+        # treated as primary — a missing/zero battery_number on a single-battery
+        # bike would otherwise leave all sensors unavailable.
+        self.battery_packet_counter += 1
+        self.state["battery_primary"] = data
+
+        if self.battery_packet_counter >= 4:
+            self.state["battery_secondary"] = {
+                "voltage": 0.0,
+                "soc": 0.0,
+                "temperature": 0,
+                "temperature_mos": None,
+                "current": 0.0,
+                "nominal_capacity": 0.0,
+                "remaining_wh": 0.0,
+                "cycles": None,
+                "is_charging": False,
+            }
+
+    def parse_motor_message(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse motor frame; dispatch by length to the right layout."""
+        if len(message) >= 20:
+            return self._parse_motor_x20(message)
+        if len(message) >= MOTOR_MESSAGE_LENGTH:
+            return self._parse_motor_ebm(message)
+        return None
+
+    def _parse_motor_ebm(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse 18-byte motor frame (X25 / X35+ / ebikemotion)."""
         assist_level = message[5]
         temperature_celsius = message[6]
         power_amp = float(read16(message, 7)) / 10.0
         speed_kmh = float(read16(message, 9)) / 10.0
-
-        # Additional values
         wheel_speed = read_unsigned_byte(message[11])
         torque_pct = message[12]
         power_max = float(read16(message, 13)) / 10.0
         max_torque_pct = message[15]
 
-        # Update state with motor data
         data = {
             "assist_level": assist_level,
             "temperature_celsius": temperature_celsius,
@@ -138,8 +191,38 @@ class BikeDataParser:
             "torque_motor_pct": torque_pct,
             "power_max_amp": power_max,
             "max_torque_motor_pct": max_torque_pct,
+            "motor_power_watts": None,
+            "rider_power_watts": None,
         }
+        self.state["motor"] = data
+        return data
 
+    def _parse_motor_x20(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse 20-byte motor frame (X20 / HUS-prefixed devices)."""
+        assist_level = read_signed_byte(message[5])
+        # Temperature is signed: 0xD8 (= -40 °C) is the "no sensor data" sentinel
+        # the bike reports during the first packets after connect.
+        temperature_celsius = read_signed_byte(message[6])
+        motor_power_watts = read16(message, 7) / 100.0
+        speed_kmh = read16(message, 9) / 10.0
+        wheel_speed_raw = read_unsigned_byte(message[11])
+        rider_power_watts = read16(message, 12) / 10.0
+        power_max_amp = read16(message, 14) / 10.0
+        # max_torque doubles as a validity flag for wheel_speed (0 → no data).
+        max_torque = read16(message, 16)
+
+        data = {
+            "assist_level": assist_level,
+            "temperature_celsius": temperature_celsius,
+            "power_amp": None,
+            "speed_kmh": speed_kmh,
+            "wheel_speed_rpm": wheel_speed_raw if max_torque != 0 else None,
+            "torque_motor_pct": None,
+            "power_max_amp": power_max_amp,
+            "max_torque_motor_pct": max_torque,
+            "motor_power_watts": motor_power_watts,
+            "rider_power_watts": rider_power_watts,
+        }
         self.state["motor"] = data
         return data
 
@@ -214,29 +297,47 @@ class BikeDataParser:
         return None
 
     def parse_ebm_message(self, message: bytes) -> Optional[Dict[str, Any]]:
-        """Parse EBM (E-Bike Management) message."""
-        if len(message) < EBM_MESSAGE_LENGTH:
-            return None
+        """Parse EBM (E-Bike Management) frame; dispatch by length."""
+        if len(message) >= 20:
+            return self._parse_ebm_x20(message)
+        if len(message) >= EBM_MESSAGE_LENGTH:
+            return self._parse_ebm_ebm(message)
+        return None
 
-        # EbmParserEbm format: 32-bit reads directly from message (big-endian)
-        # Raw values are in decimeters, divide by 10000 to get km
-        # (Mahle code divides by 10 to get meters, then displays as km by /1000)
-        if len(message) < 15:
-            return None
-
+    def _parse_ebm_ebm(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse 17-byte EBM frame (X25 / X35+ / ebikemotion)."""
         odometry_km = read32(message, 5) / 10000.0
         autonomy_km = read32(message, 9) / 10000.0
         is_light_on = message[13] == 1
         status = read_unsigned_byte(message[14])
 
-        # EbmParserEbm only parses bytes 5-14, bytes 15-16 are suffix #@
         data = {
             "odometry": odometry_km,
             "autonomy": autonomy_km,
             "is_light_on": is_light_on,
             "status": status,
         }
+        self.state["ebm"] = data
+        return data
 
+    def _parse_ebm_x20(self, message: bytes) -> Optional[Dict[str, Any]]:
+        """Parse 20-byte EBM frame (X20 / HUS-prefixed devices).
+
+        Autonomy is a 16-bit field at offset 9 (a 32-bit decode there yields
+        implausible six-digit km values). Bytes 15-17 are a fixed `HIJ` marker.
+        Byte 13 light flag is observed as 0x00 / 0x01 / 0xFF — only 0x01 means on.
+        """
+        odometry_km = read32(message, 5) / 10000.0
+        autonomy_km = read16(message, 9) / 1000.0
+        is_light_on = message[13] == 1
+        status = read_unsigned_byte(message[14])
+
+        data = {
+            "odometry": odometry_km,
+            "autonomy": autonomy_km,
+            "is_light_on": is_light_on,
+            "status": status,
+        }
         self.state["ebm"] = data
         return data
 

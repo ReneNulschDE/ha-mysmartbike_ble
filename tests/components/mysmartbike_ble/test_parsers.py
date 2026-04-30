@@ -4,8 +4,10 @@ import pytest
 from custom_components.mysmartbike_ble.parsers import (
     BikeDataParser,
     read16,
+    read16_signed,
     read24,
     read32,
+    read_signed_byte,
     read_unsigned_byte,
 )
 
@@ -34,6 +36,24 @@ class TestReadFunctions:
         assert read_unsigned_byte(0xFF) == 255
         assert read_unsigned_byte(0x00) == 0
         assert read_unsigned_byte(0x7F) == 127
+
+    def test_read_signed_byte(self):
+        """Test signed byte read."""
+        assert read_signed_byte(0x00) == 0
+        assert read_signed_byte(0x7F) == 127
+        assert read_signed_byte(0x80) == -128
+        assert read_signed_byte(0xFF) == -1
+
+    def test_read16_signed(self):
+        """Test 16-bit signed read (big-endian)."""
+        # Positive: 0x0001 → 1
+        assert read16_signed(bytes([0x00, 0x01]), 0) == 1
+        # Boundary: 0x7FFF → 32767
+        assert read16_signed(bytes([0x7F, 0xFF]), 0) == 32767
+        # Negative: 0x8000 → -32768
+        assert read16_signed(bytes([0x80, 0x00]), 0) == -32768
+        # -1: 0xFFFF
+        assert read16_signed(bytes([0xFF, 0xFF]), 0) == -1
 
 
 class TestEbmParser:
@@ -108,6 +128,132 @@ class TestMotorParser:
         assert result["assist_level"] == 1
         # Temperature at byte 6 = 0x17 = 23°C
         assert result["temperature_celsius"] == 23
+
+
+class TestMotorParserX20:
+    """20-byte motor frame parsing (X20 / HUS-prefixed devices)."""
+
+    # Real frame at rest: assist 1, 22 °C, zero power/speed, max_torque 0x03FF
+    # (the bike's idle sentinel), power_max_amp 9.0 A.
+    MOTOR_MESSAGE = bytes.fromhex("246d245a23011600000000000000005a03ff2340")
+
+    # First packet after connect: temp byte 0xD8 = -40 signed (no-sensor sentinel).
+    MOTOR_MESSAGE_BOOT = bytes.fromhex("246d245a2301d800000000000000005a03ff2340")
+
+    def test_recognition(self):
+        parser = BikeDataParser()
+        assert parser.recognize_message_type(self.MOTOR_MESSAGE) == "motor"
+
+    def test_assist_level_and_temperature(self):
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(self.MOTOR_MESSAGE)
+
+        assert result["assist_level"] == 1
+        assert result["temperature_celsius"] == 22
+
+    def test_signed_temperature_handles_no_sensor_sentinel(self):
+        """0xD8 must decode as -40 °C (signed), not 216 °C (unsigned)."""
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(self.MOTOR_MESSAGE_BOOT)
+
+        assert result["temperature_celsius"] == -40
+
+    def test_speed_and_power(self):
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(self.MOTOR_MESSAGE)
+
+        assert result["speed_kmh"] == 0.0
+        assert result["motor_power_watts"] == 0.0
+        assert result["rider_power_watts"] == 0.0
+        # power_max_amp = 0x005A / 10 = 9.0 A
+        assert abs(result["power_max_amp"] - 9.0) < 0.01
+
+    def test_max_torque_uses_offset_16(self):
+        """max_torque is a 16-bit raw value at offset 16-17 (= 0x03FF)."""
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(self.MOTOR_MESSAGE)
+
+        assert result["max_torque_motor_pct"] == 0x03FF
+
+    def test_wheel_speed_returned_when_max_torque_nonzero(self):
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(self.MOTOR_MESSAGE)
+
+        # max_torque = 0x03FF != 0 → wheel_speed byte (0x00) is returned
+        assert result["wheel_speed_rpm"] == 0
+
+    def test_wheel_speed_nulled_when_max_torque_zero(self):
+        """When max_torque == 0, wheel_speed must be None."""
+        msg = bytearray(self.MOTOR_MESSAGE)
+        msg[16] = 0x00
+        msg[17] = 0x00
+
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(bytes(msg))
+
+        assert result["wheel_speed_rpm"] is None
+
+    def test_x20_specific_fields_replace_legacy(self):
+        """The X20 frame doesn't carry power_amp / torque_motor_pct."""
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(self.MOTOR_MESSAGE)
+
+        assert result["power_amp"] is None
+        assert result["torque_motor_pct"] is None
+        assert "motor_power_watts" in result
+        assert "rider_power_watts" in result
+
+
+class TestEbmParserX20:
+    """20-byte EBM frame parsing (X20 / HUS-prefixed devices)."""
+
+    # Real frame: odometer 0x000A0502 / 10000 = 65.7 km, autonomy 0x5C00 / 1000 = 23.55 km,
+    # byte 13 = 0xFF (lights flag != 1 → off), byte 14 = 0x01 status, then 'HIJ' marker.
+    EBM_MESSAGE = bytes.fromhex("246a245a23000a05025c000002ff0148494a2340")
+
+    def test_message_length(self):
+        assert len(self.EBM_MESSAGE) == 20
+
+    def test_recognition(self):
+        parser = BikeDataParser()
+        assert parser.recognize_message_type(self.EBM_MESSAGE) == "ebm"
+
+    def test_odometer(self):
+        parser = BikeDataParser()
+        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+
+        # 0x000A0502 / 10000 = 65.7
+        assert abs(result["odometry"] - 65.7) < 0.1
+
+    def test_autonomy_uses_16bit_decode(self):
+        """Regression: a 32-bit decode at offset 9 yields ~154 000 km."""
+        parser = BikeDataParser()
+        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+
+        # 0x5C00 / 1000 = 23.552 km
+        assert 20.0 < result["autonomy"] < 30.0
+
+    def test_lights_off_when_byte13_is_ff(self):
+        """0xFF is observed alongside 0x00; only 0x01 maps to lights on."""
+        parser = BikeDataParser()
+        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+
+        assert result["is_light_on"] is False
+
+    def test_lights_on(self):
+        msg = bytearray(self.EBM_MESSAGE)
+        msg[13] = 0x01
+
+        parser = BikeDataParser()
+        result = parser.parse_ebm_message(bytes(msg))
+
+        assert result["is_light_on"] is True
+
+    def test_status_byte(self):
+        parser = BikeDataParser()
+        result = parser.parse_ebm_message(self.EBM_MESSAGE)
+
+        assert result["status"] == 0x01
 
 
 class TestBatteryParser:
@@ -193,6 +339,106 @@ class TestBatteryParser:
         # Battery number = 10036 / 10000 = 1 (primary)
         assert parser.state["battery_primary"] is not None
         assert parser.state["battery_primary"]["cycles"] == 36
+
+
+class TestBatteryParserX20:
+    """20-byte battery frame parsing (X20 / HUS-prefixed devices)."""
+
+    # Real frame from a HUS device: voltage 37.78 V, SOC 57 %, temp 22 °C,
+    # current 0 A, nominal 352.8 Wh, remaining 200.3 Wh, MOSFET temp 24 °C,
+    # combined cycles 0x2715 = 10005 → battery 1, 5 cycles.
+    BATTERY_MESSAGE = bytes.fromhex("2462245a230ec2391600000dc807d31827152340")
+
+    def test_message_length(self):
+        assert len(self.BATTERY_MESSAGE) == 20
+
+    def test_recognition(self):
+        parser = BikeDataParser()
+        assert parser.recognize_message_type(self.BATTERY_MESSAGE) == "battery"
+
+    def test_voltage_uses_centi_volt_scaling(self):
+        """Voltage on the 20-byte frame is encoded as raw / 100 (vs raw / 10 on 19-byte)."""
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert result is not None
+        assert abs(result["voltage"] - 37.78) < 0.01
+
+    def test_soc(self):
+        """SOC is the unsigned byte at offset 7 with bit 7 masked off."""
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert result["soc"] == 57
+        assert result["is_charging"] is False
+
+    def test_temperature(self):
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert result["temperature"] == 22
+
+    def test_current_is_zero_at_rest(self):
+        """Current is signed read16 / 10."""
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert result["current"] == 0.0
+
+    def test_capacity_and_remaining(self):
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert abs(result["nominal_capacity"] - 352.8) < 0.1
+        assert abs(result["remaining_wh"] - 200.3) < 0.1
+
+    def test_temperature_mos(self):
+        """A BMS MOSFET temperature byte sits at offset 15."""
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        # 0x18 = 24°C
+        assert result["temperature_mos"] == 24
+
+    def test_cycles_at_offset_16(self):
+        """(battery_number * 10000 + cycles) is read at offset 16-17, not 15-16."""
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        # 0x2715 = 10005 → battery 1, 5 cycles
+        assert result["cycles"] == 5
+
+    def test_primary_state_is_set(self):
+        """Regression: reading the combined field at offset 15 would compute
+        battery_number == 0 here and silently drop the update."""
+        parser = BikeDataParser()
+        parser.parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert parser.state["battery_primary"] is not None
+        assert parser.state["battery_primary"]["soc"] == 57
+
+    def test_signed_current_when_charging(self):
+        """A negative raw current value should decode as negative amps."""
+        # Replace bytes 9-10 with 0xFFEC (= -20 raw → -2.0 A)
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[9] = 0xFF
+        msg[10] = 0xEC
+
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(bytes(msg))
+
+        assert abs(result["current"] - (-2.0)) < 0.001
+
+    def test_charging_bit_in_soc_byte(self):
+        """When the SOC byte's bit 7 is set, is_charging is True and SOC is masked."""
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[7] = 0x80 | 57  # charging flag + 57% SOC
+
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(bytes(msg))
+
+        assert result["is_charging"] is True
+        assert result["soc"] == 57
 
 
 class TestVinParser:
