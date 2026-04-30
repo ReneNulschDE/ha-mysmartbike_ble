@@ -99,8 +99,7 @@ class MySmartBikeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ):
                 continue
 
-            # Check if device name starts with "iWoc"
-            if discovery_info.name and discovery_info.name.startswith("iWoc"):
+            if discovery_info.name and discovery_info.name.startswith(("iWoc", "HUS")):
                 self._discovered_devices[discovery_info.address] = discovery_info
 
         if not self._discovered_devices:

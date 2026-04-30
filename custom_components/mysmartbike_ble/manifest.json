@@ -4,6 +4,9 @@
   "bluetooth": [
     {
       "local_name": "iWoc*"
+    },
+    {
+      "local_name": "HUS*"
     }
   ],
   "codeowners": [

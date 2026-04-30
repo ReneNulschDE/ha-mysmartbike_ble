@@ -90,10 +90,10 @@ The integration is configured through the Home Assistant UI:
 1. Go to **Settings** → **Devices & Services**
 2. Click **+ Add Integration**
 3. Search for **MySmartBike BLE**
-4. Select your iWoc device from the list
+4. Select your iWoc/HUS device from the list
 5. Click **Submit**
 
-The integration will automatically discover iWoc devices in range via Bluetooth.
+The integration will automatically discover iWoc and HUS devices in range via Bluetooth.
 
 ## Troubleshooting
 
@@ -101,7 +101,7 @@ The integration will automatically discover iWoc devices in range via Bluetooth.
 
 - Make sure your E-Bike is turned on and in range
 - Check that Bluetooth is enabled on your Home Assistant host
-- Verify that the device name starts with "iWoc" (please report other device names)
+- Verify that the device name starts with "iWoc" or "HUS" (please report other device names)
 
 ### Connection issues
 
