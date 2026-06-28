@@ -69,7 +69,7 @@ The integration automatically retrieves and displays:
 2. Click on "Integrations"
 3. Click the three dots in the top right corner
 4. Select "Custom repositories"
-5. Add this repository URL: `https://github.com/renenulschde/ha-mysmartbike-ble`
+5. Add this repository URL: `https://github.com/renenulschde/ha-mysmartbike_ble`
 6. Select category "Integration"
 7. Click "Add"
 8. Search for "MySmartBike BLE" in HACS
@@ -78,7 +78,7 @@ The integration automatically retrieves and displays:
 
 ### Manual Installation
 
-1. Download the latest release from the [releases page](https://github.com/renenulschde/ha-mysmartbike-ble/releases)
+1. Download the latest release from the [releases page](https://github.com/renenulschde/ha-mysmartbike_ble/releases)
 2. Extract the files
 3. Copy the `custom_components/mysmartbike_ble` folder to your Home Assistant `custom_components` directory
 4. Restart Home Assistant
