@@ -23,16 +23,17 @@ This integration has been developed and tested with:
 
 ## Features
 
-This integration provides real-time monitoring of your E-Bike through Bluetooth LE connection with 11 sensors, 1 binary sensor, and 1 switch:
+This integration provides real-time monitoring of your E-Bike through Bluetooth LE connection with 14 sensors, 1 binary sensor, and 1 switch:
 
 ### Connection Control
 
-- **Connection Switch** - Control the BLE connection to your E-Bike
-  - Turning off this switch will disconnect from the bike and **the bike will shut down after approximately 5 minutes**. You must manually turn the bike back on or connect it to power to reconnect!
-  - Use this switch to save energy when you don't need active monitoring
-  - The bike will automatically turn off about 5 minutes after disconnection to conserve battery
+- **Auto-connect** (Switch) - Controls whether the integration may connect to your E-Bike
+  - This is the connection *wish*, not the connection status. It stays on while the bike is away, so the integration reconnects on its own once the bike is switched on.
+  - Turning it off disconnects from the bike and **the bike will shut down after approximately 5 minutes**. You must manually turn the bike back on or connect it to power to reconnect!
+  - Use it to save energy when you don't need active monitoring
+  - The position is remembered across Home Assistant restarts
 
-- **Connected** (Binary Sensor) - Shows current BLE connection status to the bike
+- **Connected** (Binary Sensor) - The actual live BLE connection status
 
 ### Battery Sensors
 - **Battery State of Charge** (%)
@@ -40,14 +41,19 @@ This integration provides real-time monitoring of your E-Bike through Bluetooth 
 - **Battery Remaining Energy** (Wh)
 
 ### Motor Sensors
-- **Assist Level**
+- **Assist Level** - disabled by default
 - **Motor Temperature** (°C)
 - **Speed** (km/h)
 
 ### E-Bike Management (EBM)
 - **Odometer** (km)
 - **Range** (km)
+- **Trip A Distance** (km)
+- **Trip A Range** (km) - disabled by default
 - **Light Status**
+- **EBM Status**
+
+Trip A values are only reported by newer X20 bikes (device names starting with `HUS`). On X25 / X35+ bikes they stay "Unknown".
 
 ### Diagnostics
 - **Last Seen** (Timestamp) - When the bike last sent data, so you can tell how fresh the values are
@@ -60,9 +66,9 @@ The integration automatically retrieves and displays:
 
 ## Requirements
 
-- Home Assistant 2024.1.6 or newer
+- Home Assistant 2024.6.0 or newer
 - Bluetooth adapter with BLE support
-- Bluetooth proxies with active connections are supported (ex. EspHome) - Shelly is not support as active direct connections are not possible.
+- Bluetooth proxies with **active connections** are supported (e.g. ESPHome). Shelly proxies are passive-only: they can see the bike but never connect to it.
 - E-Bike with Mahle SmartBike system (compatible with MySmartBike or ebikemotion app)
 
 ## Installation
@@ -106,6 +112,7 @@ The integration will automatically discover iWoc and HUS devices in range via Bl
 - Make sure your E-Bike is turned on and in range
 - Check that Bluetooth is enabled on your Home Assistant host
 - Verify that the device name starts with "iWoc" or "HUS" (please report other device names)
+- Check the log. If it says the bike *is advertising but no adapter or proxy that supports active connections can reach it*, the bike is only being seen by a passive proxy (e.g. a Shelly). You need a local Bluetooth adapter or an ESPHome proxy with `active: true` in range of the bike.
 
 ### Connection issues
 
@@ -115,7 +122,8 @@ The integration will automatically discover iWoc and HUS devices in range via Bl
 
 ### Sensor values not updating
 
-- The integration updates data every 30 seconds when connected
+- While connected, the bike pushes data continuously and the sensors update within a second
+- The 30-second interval is only the retry timer used while the bike is *not* connected
 - Some sensors may show "Unknown" until the bike sends that specific data
 - Check if the bike is actively transmitting data (try riding or using the display)
 
@@ -129,18 +137,22 @@ The integration keeps working when the bike is switched off or out of range:
   are **not** restored and show "Unknown" until the bike connects again — a
   stale speed reading would look like live data from a parked bike
 - Use **Connected** and **Last Seen** to tell live data from last known values
-- The connection switch keeps its position across restarts, so a bike you
+- The **Auto-connect** switch keeps its position across restarts, so a bike you
   deliberately disconnected is not woken up again by a Home Assistant restart
 
-### Connection Switch
+Values are only stored from the moment the bike connects. Directly after
+installing or updating the integration, sensors read "Unknown" until the bike
+has been connected once — from then on they survive restarts.
 
-- **To disconnect**: Turn off the "Connection" switch in Home Assistant
+### Auto-connect Switch
+
+- **To disconnect**: Turn off the "Auto-connect" switch in Home Assistant
   - ⚠️ This will shut down your bike after approximately 5 minutes!
   - The bike will remain on for about 5 minutes before automatically powering off
 - **To reconnect**:
   1. First, manually turn on your bike OR connect it to power
   2. Wait for the bike to be fully powered on
-  3. Turn on the "Connection" switch in Home Assistant
+  3. Turn on the "Auto-connect" switch in Home Assistant
 - **Use case**: Turn off the connection when you don't need monitoring to save your bike's battery
 
 
