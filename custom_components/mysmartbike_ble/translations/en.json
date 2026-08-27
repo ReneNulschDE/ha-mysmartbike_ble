@@ -27,9 +27,14 @@
     }
   },
   "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      }
+    },
     "switch": {
       "connection": {
-        "name": "Connection"
+        "name": "Auto-connect"
       }
     }
   }

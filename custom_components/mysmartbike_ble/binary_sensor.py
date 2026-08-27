@@ -53,14 +53,14 @@ class MySmartBikeConnectionSensor(CoordinatorEntity[MySmartBikeCoordinator], Bin
         self._attr_translation_key = "connected"
 
     @property
+    def available(self) -> bool:
+        """Return True - "not connected" is a state, not an absence of one."""
+        return True
+
+    @property
     def is_on(self) -> bool:
         """Return True if connected to the bike."""
         return self.coordinator.is_connected
-
-    @property
-    def name(self) -> str:
-        """Return the name of the sensor."""
-        return "Connected"
 
     @property
     def icon(self) -> str:

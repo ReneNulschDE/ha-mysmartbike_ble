@@ -7,10 +7,10 @@ from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, CONF_DEVICE_ADDRESS
-from .coordinator import MySmartBikeCoordinator
+from .const import CONF_DEVICE_ADDRESS, DOMAIN, STORAGE_VERSION
+from .coordinator import MySmartBikeCoordinator, storage_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -18,34 +18,35 @@ PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.S
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up MySmartBike BLE from a config entry."""
+    """Set up MySmartBike BLE from a config entry.
+
+    Setup never depends on the bike being in range. A bike that is switched off
+    or parked out of reach is the normal case, so the entry loads with the
+    persisted state and the coordinator connects whenever the bike shows up.
+    """
     address = entry.data[CONF_DEVICE_ADDRESS]
 
-    # Get BLE device
-    ble_device = bluetooth.async_ble_device_from_address(hass, address, connectable=True)
-    if not ble_device:
-        # Log warning only once per config entry
-        hass.data.setdefault(DOMAIN, {})
-        warning_key = f"warned_{entry.entry_id}"
-
-        if not hass.data[DOMAIN].get(warning_key):
-            _LOGGER.warning(
-                "MySmartBike device %s not found - ensure bike is powered on and in range",
-                address
-            )
-            hass.data[DOMAIN][warning_key] = True
-        raise ConfigEntryNotReady(f"Could not find MySmartBike device with address {address}")
-
-    # Clear warning flag when device is found
-    if DOMAIN in hass.data:
-        hass.data[DOMAIN].pop(f"warned_{entry.entry_id}", None)
-
-    # Create and initialize coordinator
-    coordinator = MySmartBikeCoordinator(hass, ble_device, entry)
-    await coordinator.async_config_entry_first_refresh()
-
+    coordinator = MySmartBikeCoordinator(hass, address, entry)
+    # Restore before the platforms are set up so the entities' first state
+    # write already carries the last known values and the serial number.
+    await coordinator.async_restore()
     entry.runtime_data = coordinator
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Connect the moment the bike advertises instead of waiting for a poll tick.
+    entry.async_on_unload(coordinator.async_start_bluetooth_watch())
+
+    if bluetooth.async_ble_device_from_address(hass, address, connectable=True) is None:
+        _LOGGER.info(
+            "MySmartBike device %s not in range - showing last known values, "
+            "will connect automatically once the bike is powered on",
+            address,
+        )
+
+    entry.async_create_background_task(
+        hass, coordinator.async_first_connect(), f"{DOMAIN} initial connect {address}"
+    )
 
     _LOGGER.debug("MySmartBike BLE setup completed for %s", address)
     return True
@@ -59,8 +60,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator: MySmartBikeCoordinator = entry.runtime_data
         await coordinator.async_shutdown()
 
-        # Clean up warning flag from hass.data
-        if DOMAIN in hass.data:
-            hass.data[DOMAIN].pop(f"warned_{entry.entry_id}", None)
-
     return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the persisted state when the bike is removed from Home Assistant."""
+    await Store(hass, STORAGE_VERSION, storage_key(entry)).async_remove()

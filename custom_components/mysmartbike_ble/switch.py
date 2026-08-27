@@ -50,8 +50,17 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
         self._attr_translation_key = "connection"
 
     @property
+    def available(self) -> bool:
+        """Return True - the connection wish can always be changed."""
+        return True
+
+    @property
     def is_on(self) -> bool:
-        """Return True if connection is desired (not manually disconnected)."""
+        """Return True if connection is desired (not manually disconnected).
+
+        Restored from storage on startup, so a bike the user deliberately
+        disconnected is not woken again by a Home Assistant restart.
+        """
         return not self.coordinator._manual_disconnect
 
     @property
@@ -60,9 +69,11 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
         return "mdi:bluetooth-connect" if self.is_on else "mdi:bluetooth-off"
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the switch - request connection to the bike."""
-        self.async_write_ha_state()
+        """Turn on the switch - request connection to the bike.
 
+        The switch reflects the *wish* to be connected, so it stays on even when
+        the bike is currently unreachable - the coordinator keeps retrying.
+        """
         try:
             await self.coordinator.async_reconnect()
         except Exception as ex:
@@ -71,6 +82,8 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
                 _LOGGER.warning("Cannot connect - bike not reachable. Will auto-connect when available.")
             else:
                 _LOGGER.error("Failed to connect to bike: %s", ex)
+        finally:
+            self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch - disconnect from the bike.

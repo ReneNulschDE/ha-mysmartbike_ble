@@ -49,6 +49,10 @@ This integration provides real-time monitoring of your E-Bike through Bluetooth 
 - **Range** (km)
 - **Light Status**
 
+### Diagnostics
+- **Last Seen** (Timestamp) - When the bike last sent data, so you can tell how fresh the values are
+- **Signal Strength** (dBm) - disabled by default
+
 ### Device Information
 The integration automatically retrieves and displays:
 - **Serial Number** (VIN) - 17-character bike serial number
@@ -114,6 +118,19 @@ The integration will automatically discover iWoc and HUS devices in range via Bl
 - The integration updates data every 30 seconds when connected
 - Some sensors may show "Unknown" until the bike sends that specific data
 - Check if the bike is actively transmitting data (try riding or using the display)
+
+### Values after a Home Assistant restart
+
+The integration keeps working when the bike is switched off or out of range:
+
+- Counters and battery values (odometer, trip distance, range, state of charge,
+  remaining energy, light) are stored and shown again after a restart
+- Momentary readings (speed, motor temperature, assist level, battery current)
+  are **not** restored and show "Unknown" until the bike connects again — a
+  stale speed reading would look like live data from a parked bike
+- Use **Connected** and **Last Seen** to tell live data from last known values
+- The connection switch keeps its position across restarts, so a bike you
+  deliberately disconnected is not woken up again by a Home Assistant restart
 
 ### Connection Switch
 
