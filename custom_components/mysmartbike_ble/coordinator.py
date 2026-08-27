@@ -35,6 +35,7 @@ from .const import (
     PROTOCOL_REQUEST_MESSAGE,
     CLOSE_MESSAGE,
     SCAN_INTERVAL,
+    MIN_LINK_SECONDS_FOR_FAST_RECONNECT,
     STORAGE_SAVE_DELAY,
     STORAGE_VERSION,
     RESTORE_STATE_KEYS,
@@ -84,6 +85,9 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_seen: datetime | None = None
         self._save_armed = False
         self._unreachable_reason: str | None = None
+        self._connecting = False
+        self._advertisements_seen = 0
+        self._connected_since: float | None = None
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, storage_key(entry)
         )
@@ -214,14 +218,35 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     @callback
+    def _async_claim_connect(self) -> bool:
+        """Reserve the right to run one connect attempt.
+
+        Home Assistant invokes the bluetooth callback on *every* advertisement,
+        and these bikes advertise several times a second. Without a claim, a
+        disconnected bike would queue hundreds of connect tasks behind
+        `_connect_lock`, each running a full `establish_connection` retry cycle
+        against a proxy that is already struggling to hold the link.
+        """
+        if self._is_connected or self._manual_disconnect or self._connecting:
+            return False
+        self._connecting = True
+        return True
+
+    @callback
     def _async_device_appeared(
         self, service_info: BluetoothServiceInfoBleak, change: BluetoothChange
     ) -> None:
         """Handle the bike showing up in range."""
-        if self._is_connected or self._manual_disconnect:
+        self._advertisements_seen += 1
+        if not self._async_claim_connect():
             return
+        _LOGGER.debug(
+            "Advertisement from %s (%d seen) - connecting now",
+            self._address,
+            self._advertisements_seen,
+        )
         self._entry.async_create_background_task(
-            self.hass, self._async_try_connect(), f"{DOMAIN} connect {self._address}"
+            self.hass, self._async_run_connect(), f"{DOMAIN} connect {self._address}"
         )
 
     @callback
@@ -239,6 +264,25 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._is_connected = False
         self.async_update_listeners()
 
+        # Don't sit out the poll interval. These bikes stop advertising after an
+        # unexpected link loss, so the advertisement watch does not fire, and
+        # every notification has just pushed the poll timer another 30s out -
+        # leaving the bike disconnected far longer than necessary.
+        held_for = (
+            self.hass.loop.time() - self._connected_since
+            if self._connected_since is not None
+            else 0.0
+        )
+        self._connected_since = None
+        if held_for < MIN_LINK_SECONDS_FOR_FAST_RECONNECT:
+            # A link that died almost immediately would spin; let the poll retry.
+            return
+        if not self._async_claim_connect():
+            return
+        self._entry.async_create_background_task(
+            self.hass, self._async_run_connect(), f"{DOMAIN} reconnect {self._address}"
+        )
+
     async def async_first_connect(self) -> None:
         """Attempt the initial connection without blocking setup."""
         if self._manual_disconnect:
@@ -250,6 +294,12 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_try_connect()
 
     async def _async_try_connect(self) -> None:
+        """Run a connect attempt unless one is already in flight."""
+        if not self._async_claim_connect():
+            return
+        await self._async_run_connect()
+
+    async def _async_run_connect(self) -> None:
         """Connect, reporting the expected 'bike is off' failures once each."""
         try:
             await self._connect()
@@ -257,6 +307,8 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._async_report_unreachable(str(ex))
         except Exception as ex:  # noqa: BLE001
             self._async_report_unreachable(f"Connection attempt failed: {ex}")
+        finally:
+            self._connecting = False
 
     def _async_report_unreachable(self, reason: str) -> None:
         """Log why we cannot connect - once per distinct reason.
@@ -376,6 +428,13 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             state["rssi"] = None
 
         state["last_seen"] = self._last_seen
+        _LOGGER.debug(
+            "%s: connected=%s advertisements_seen=%s rssi=%s",
+            self._address,
+            self._is_connected,
+            self._advertisements_seen,
+            state["rssi"],
+        )
         return state
 
     async def _connect(self) -> None:
@@ -418,6 +477,7 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     return
 
                 self._is_connected = True
+                self._connected_since = self.hass.loop.time()
                 self._unreachable_reason = None
                 _LOGGER.debug("Connected to %s", self._address)
 

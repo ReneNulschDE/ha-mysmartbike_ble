@@ -53,3 +53,8 @@ VOLATILE_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "battery_secondary": ("current", "is_charging"),
     "ebm": ("status", "accel_y", "accel_z"),
 }
+
+# A link that survived at least this long is worth reconnecting immediately when
+# it drops; anything shorter is left to the regular poll so a bike that cannot
+# hold a connection does not spin in a reconnect loop.
+MIN_LINK_SECONDS_FOR_FAST_RECONNECT: Final = 5.0

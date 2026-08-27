@@ -269,7 +269,12 @@ async def test_reconnects_when_bike_appears(
     """An advertisement triggers a connect instead of waiting for the poll."""
     await setup_offline(hass, restore_config_entry)
     coordinator = restore_config_entry.runtime_data
-    coordinator._is_connected = False
+    await wait_connected(hass, coordinator)
+
+    # Drop the link the way bleak reports one
+    coordinator._async_client_disconnected(coordinator._client)
+    await hass.async_block_till_done()
+    assert coordinator.is_connected is False
 
     with patch.object(
         coordinator, "_connect", new_callable=AsyncMock
@@ -446,3 +451,89 @@ async def test_unreachable_warning_is_not_repeated(
                 await hass.async_block_till_done()
 
     assert "turn on the bike" not in caplog.text
+
+
+async def test_advertisement_storm_starts_one_connect_attempt(
+    hass: HomeAssistant,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_in_range,
+    mock_bluetooth_service_info,
+) -> None:
+    """Home Assistant fires the callback on every advertisement.
+
+    These bikes advertise several times a second, so an unguarded callback
+    would queue a connect task per advertisement, all serialising behind
+    _connect_lock and each hammering the proxy with a full retry cycle.
+    """
+    await setup_offline(hass, restore_config_entry)
+    coordinator = restore_config_entry.runtime_data
+    await wait_connected(hass, coordinator)
+    coordinator._async_client_disconnected(coordinator._client)
+    await hass.async_block_till_done()
+
+    started = 0
+    release = asyncio.Event()
+
+    async def slow_connect() -> None:
+        nonlocal started
+        started += 1
+        await release.wait()
+
+    with patch.object(coordinator, "_connect", side_effect=slow_connect):
+        for _ in range(50):
+            coordinator._async_device_appeared(mock_bluetooth_service_info, None)
+        await asyncio.sleep(0)
+        await hass.async_block_till_done()
+
+        assert started == 1, f"{started} connect attempts for 50 advertisements"
+
+        release.set()
+        await hass.async_block_till_done()
+
+    # ...and the claim is released, so a later advertisement can still connect
+    assert coordinator._connecting is False
+
+
+async def test_fast_reconnect_after_established_link_drops(
+    hass: HomeAssistant,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_in_range,
+) -> None:
+    """A dropped link reconnects at once instead of waiting out the poll.
+
+    These bikes stop advertising after an unexpected disconnect, so the
+    advertisement watch never fires, and every notification has just pushed the
+    poll timer another SCAN_INTERVAL out.
+    """
+    await setup_offline(hass, restore_config_entry)
+    coordinator = restore_config_entry.runtime_data
+    await wait_connected(hass, coordinator)
+
+    # Pretend the link had been up comfortably longer than the spin guard
+    coordinator._connected_since = hass.loop.time() - 120
+
+    with patch.object(coordinator, "_connect", new_callable=AsyncMock) as mock_connect:
+        coordinator._async_client_disconnected(coordinator._client)
+        await hass.async_block_till_done()
+        mock_connect.assert_called_once()
+
+
+async def test_no_fast_reconnect_when_link_died_immediately(
+    hass: HomeAssistant,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_in_range,
+) -> None:
+    """A link that collapses at once must not spin; the poll retries instead."""
+    await setup_offline(hass, restore_config_entry)
+    coordinator = restore_config_entry.runtime_data
+    await wait_connected(hass, coordinator)
+
+    coordinator._connected_since = hass.loop.time()  # just connected
+
+    with patch.object(coordinator, "_connect", new_callable=AsyncMock) as mock_connect:
+        coordinator._async_client_disconnected(coordinator._client)
+        await hass.async_block_till_done()
+        mock_connect.assert_not_called()
