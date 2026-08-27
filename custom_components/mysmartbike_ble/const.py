@@ -36,3 +36,20 @@ CONF_DEVICE_ADDRESS: Final = "device_address"
 
 # Options
 CONF_LOG_BLE_MESSAGES: Final = "log_ble_messages"
+
+# Persistence
+STORAGE_VERSION: Final = 1
+STORAGE_SAVE_DELAY: Final = 60  # seconds; BLE notifications arrive far too often to save eagerly
+
+# Top-level parser state keys that survive a restart. "motor" and "assist" are
+# deliberately absent: a restored speed or power reading would look like live
+# data from a bike that is actually parked.
+RESTORE_STATE_KEYS: Final = ("battery_primary", "battery_secondary", "ebm")
+
+# Fields inside the restored dicts that describe an instantaneous condition and
+# are therefore dropped (set to None) when reading the state back.
+VOLATILE_FIELDS: Final[dict[str, tuple[str, ...]]] = {
+    "battery_primary": ("current", "is_charging"),
+    "battery_secondary": ("current", "is_charging"),
+    "ebm": ("status", "accel_y", "accel_z"),
+}

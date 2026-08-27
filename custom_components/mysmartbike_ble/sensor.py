@@ -163,6 +163,14 @@ SENSORS: tuple[MySmartBikeSensorEntityDescription, ...] = (
         icon="mdi:wifi",
         value_fn=lambda data: safe_get(data, "rssi"),
     ),
+    MySmartBikeSensorEntityDescription(
+        key="last_seen",
+        name="Last Seen",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:clock-outline",
+        value_fn=lambda data: safe_get(data, "last_seen"),
+    ),
 )
 
 
@@ -211,6 +219,15 @@ class MySmartBikeSensor(CoordinatorEntity[MySmartBikeCoordinator], SensorEntity)
         # Add protocol version as software version
         if coordinator.protocol_version:
             self._attr_device_info["sw_version"] = coordinator.protocol_version
+
+    @property
+    def available(self) -> bool:
+        """Return True - values are last-known-good, not live readings.
+
+        An unreachable bike must not blank the sensors; `binary_sensor.connected`
+        and the "Last Seen" timestamp tell the user how fresh the values are.
+        """
+        return True
 
     @property
     def native_value(self) -> Any:
