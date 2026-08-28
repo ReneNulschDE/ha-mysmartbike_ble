@@ -35,6 +35,7 @@ from .const import (
     PROTOCOL_REQUEST_MESSAGE,
     CLOSE_MESSAGE,
     SCAN_INTERVAL,
+    LAST_SEEN_RESOLUTION,
     MIN_LINK_SECONDS_FOR_FAST_RECONNECT,
     STORAGE_SAVE_DELAY,
     STORAGE_VERSION,
@@ -171,6 +172,24 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_seen,
             "disabled" if self._manual_disconnect else "enabled",
         )
+
+    @callback
+    def _publish_last_seen(self) -> None:
+        """Move the entity-visible timestamp forward at most every 30 seconds.
+
+        `self._last_seen` stays exact - it is what gets persisted - but writing
+        it to the entity on every notification produced roughly 2800 database
+        rows per hour per bike, more than any other entity in a real install.
+        """
+        if self._last_seen is None:
+            return
+        published = self._parser.state.get("last_seen")
+        if (
+            published is not None
+            and (self._last_seen - published).total_seconds() < LAST_SEEN_RESOLUTION
+        ):
+            return
+        self._parser.state["last_seen"] = self._last_seen
 
     def _persist_data(self) -> dict[str, Any]:
         """Build the payload written to .storage."""
@@ -427,7 +446,7 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             state["rssi"] = None
 
-        state["last_seen"] = self._last_seen
+        self._publish_last_seen()
         _LOGGER.debug(
             "%s: connected=%s advertisements_seen=%s rssi=%s",
             self._address,
@@ -509,7 +528,7 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._parser.handle_message(bytes(data))
 
         self._last_seen = dt_util.utcnow()
-        self._parser.state["last_seen"] = self._last_seen
+        self._publish_last_seen()
         self._schedule_save()
 
         # Update coordinator data
