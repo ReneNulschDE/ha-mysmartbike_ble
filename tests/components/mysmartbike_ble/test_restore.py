@@ -537,3 +537,68 @@ async def test_no_fast_reconnect_when_link_died_immediately(
         coordinator._async_client_disconnected(coordinator._client)
         await hass.async_block_till_done()
         mock_connect.assert_not_called()
+
+
+async def test_last_seen_is_throttled(
+    hass: HomeAssistant,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_in_range,
+    freezer,
+) -> None:
+    """A timestamp that moves on every packet floods the recorder.
+
+    Notifications arrive about once a second; the entity only needs to say how
+    fresh the values are, so it moves at LAST_SEEN_RESOLUTION granularity while
+    the exact time is still what gets persisted.
+    """
+    from custom_components.mysmartbike_ble.const import LAST_SEEN_RESOLUTION
+
+    await setup_offline(hass, restore_config_entry)
+    coordinator = restore_config_entry.runtime_data
+    frame = bytearray.fromhex("246a245a2300008402e1000001f50148494a2340")
+
+    coordinator._notification_handler(0, frame)
+    first = coordinator.data["last_seen"]
+    assert first is not None
+
+    # A burst of notifications inside the window must not move the entity
+    for _ in range(10):
+        freezer.tick(timedelta(seconds=1))
+        coordinator._notification_handler(0, frame)
+    assert coordinator.data["last_seen"] == first
+    # ...while the persisted timestamp keeps tracking reality
+    assert coordinator.last_seen > first
+
+    # Past the window it moves again
+    freezer.tick(timedelta(seconds=LAST_SEEN_RESOLUTION))
+    coordinator._notification_handler(0, frame)
+    assert coordinator.data["last_seen"] > first
+
+
+async def test_distances_are_rounded_to_100m(
+    hass: HomeAssistant,
+    hass_storage,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_out_of_range,
+) -> None:
+    """Four decimals of false precision would be a database row each."""
+    seed_storage(
+        hass_storage,
+        {
+            **STORED_STATE,
+            "ebm": {
+                **STORED_STATE["ebm"],
+                "odometry": 806.1488,
+                "autonomy": 14.6065,
+                "trip_odometry": 12.3456,
+                "trip_autonomy": 58.9876,
+            },
+        },
+    )
+    await setup_offline(hass, restore_config_entry)
+
+    assert hass.states.get(entity_id_for(hass, "_odometer")).state == "806.1"
+    assert hass.states.get(entity_id_for(hass, "_range")).state == "14.6"
+    assert hass.states.get(entity_id_for(hass, "_trip_distance")).state == "12.3"

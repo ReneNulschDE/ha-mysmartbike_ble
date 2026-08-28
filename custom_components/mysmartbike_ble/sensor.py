@@ -28,6 +28,17 @@ from .const import DOMAIN, MANUFACTURER, MODEL, CONF_DEVICE_NAME
 from .coordinator import MySmartBikeCoordinator
 
 
+def round_km(value: Any) -> float | None:
+    """Round a distance to 0.1 km.
+
+    The ebikemotion frames carry these as `read32 / 10000`, which yields four
+    decimals of false precision - 14.6065, 14.6529, 14.6297 for a range that is
+    really "14.6". Every flicker in the last digit would be another state write
+    and another database row.
+    """
+    return None if value is None else round(float(value), 1)
+
+
 def safe_get(data: dict[str, Any] | None, *keys: str) -> Any:
     """Safely get nested dictionary values."""
     if data is None:
@@ -108,7 +119,7 @@ SENSORS: tuple[MySmartBikeSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.TOTAL_INCREASING,
         icon="mdi:counter",
-        value_fn=lambda data: safe_get(data, "ebm", "odometry"),
+        value_fn=lambda data: round_km(safe_get(data, "ebm", "odometry")),
     ),
     MySmartBikeSensorEntityDescription(
         key="range",
@@ -117,7 +128,7 @@ SENSORS: tuple[MySmartBikeSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:map-marker-distance",
-        value_fn=lambda data: safe_get(data, "ebm", "autonomy"),
+        value_fn=lambda data: round_km(safe_get(data, "ebm", "autonomy")),
     ),
     MySmartBikeSensorEntityDescription(
         key="trip_distance",
@@ -126,7 +137,7 @@ SENSORS: tuple[MySmartBikeSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.TOTAL_INCREASING,
         icon="mdi:bike",
-        value_fn=lambda data: safe_get(data, "ebm", "trip_odometry"),
+        value_fn=lambda data: round_km(safe_get(data, "ebm", "trip_odometry")),
     ),
     MySmartBikeSensorEntityDescription(
         key="trip_range",
@@ -136,7 +147,7 @@ SENSORS: tuple[MySmartBikeSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:map-marker-distance",
         entity_registry_enabled_default=False,
-        value_fn=lambda data: safe_get(data, "ebm", "trip_autonomy"),
+        value_fn=lambda data: round_km(safe_get(data, "ebm", "trip_autonomy")),
     ),
     MySmartBikeSensorEntityDescription(
         key="light",

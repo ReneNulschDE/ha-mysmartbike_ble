@@ -58,3 +58,9 @@ VOLATILE_FIELDS: Final[dict[str, tuple[str, ...]]] = {
 # it drops; anything shorter is left to the regular poll so a bike that cannot
 # hold a connection does not spin in a reconnect loop.
 MIN_LINK_SECONDS_FOR_FAST_RECONNECT: Final = 5.0
+
+# Granularity of the "Last Seen" entity. Notifications arrive about once a
+# second; publishing each one made this timestamp the single biggest recorder
+# writer in a real installation. Its job - telling you how fresh the values are
+# - needs nothing near that resolution. The precise value is still persisted.
+LAST_SEEN_RESOLUTION: Final = 30  # seconds
