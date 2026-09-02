@@ -88,6 +88,7 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._unreachable_reason: str | None = None
         self._connecting = False
         self._advertisements_seen = 0
+        self._empty_notifications = 0
         self._connected_since: float | None = None
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, storage_key(entry)
@@ -405,24 +406,46 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._schedule_save()
         await self._cleanup_client(send_close=True, wait_for_slot=True)
 
-    async def async_reconnect(self) -> None:
-        """Reconnect to the device (user initiated)."""
-        _LOGGER.debug("User-initiated reconnect for %s", self._address)
+    @callback
+    def async_request_connect(self) -> None:
+        """Record the user's wish to be connected and start trying (user initiated).
 
-        # Clean up any existing client first
-        await self._cleanup_client(send_close=False, wait_for_slot=True)
-
-        # Clear manual disconnect flag to allow auto-reconnect
+        Deliberately not a coroutine. The switch has to publish its new state at
+        once, and awaiting the connect attempt made the toggle look stuck for up
+        to a minute: a bike no connectable adapter can reach spends that long in
+        `establish_connection`'s retry cycle before it gives up. The wish is
+        recorded here and the attempt runs in the background.
+        """
+        _LOGGER.debug("User-initiated connect for %s", self._address)
         self._manual_disconnect = False
         self._schedule_save()
+        self._entry.async_create_background_task(
+            self.hass,
+            self._async_run_reconnect(),
+            f"{DOMAIN} user connect {self._address}",
+        )
+
+    async def _async_run_reconnect(self) -> None:
+        """Drop a stale link, then connect - one attempt at a time.
+
+        Claiming the attempt is what stops an impatient user from queuing
+        several full retry cycles behind `_connect_lock`. Each queued cycle runs
+        to completion, so repeated toggling used to make the wait longer rather
+        than shorter.
+        """
+        if not self._async_claim_connect():
+            _LOGGER.debug("Connect attempt for %s already in flight", self._address)
+            return
 
         try:
+            await self._cleanup_client(send_close=False, wait_for_slot=True)
             await self._connect()
-        except Exception as ex:
-            error_str = str(ex).lower()
-            if "not reachable" not in error_str and "turn on the bike" not in error_str:
-                _LOGGER.error("Reconnect failed: %s", ex)
-            raise
+        except UpdateFailed as ex:
+            self._async_report_unreachable(str(ex))
+        except Exception as ex:  # noqa: BLE001
+            self._async_report_unreachable(f"Reconnect failed: {ex}")
+        finally:
+            self._connecting = False
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Refresh diagnostics and auto-reconnect; never fails the entities.
@@ -448,10 +471,11 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._publish_last_seen()
         _LOGGER.debug(
-            "%s: connected=%s advertisements_seen=%s rssi=%s",
+            "%s: connected=%s advertisements_seen=%s empty_notifications=%s rssi=%s",
             self._address,
             self._is_connected,
             self._advertisements_seen,
+            self._empty_notifications,
             state["rssi"],
         )
         return state
@@ -516,6 +540,15 @@ class MySmartBikeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _notification_handler(self, sender: int, data: bytearray) -> None:
         """Handle notification data."""
+        if not data:
+            # Some links deliver zero-length notifications several times a
+            # second. They carry nothing, but each one used to log three lines,
+            # queue a file write and wake every entity through
+            # `async_set_updated_data`. Counted rather than logged - the total
+            # rides along on the poll tick below.
+            self._empty_notifications += 1
+            return
+
         # Recognize message type before saving
         message_type = self._parser.recognize_message_type(bytes(data))
         _LOGGER.debug("BLE notification [%s]: %s", message_type, data.hex())

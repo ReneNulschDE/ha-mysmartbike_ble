@@ -20,6 +20,40 @@ BATTERY_MESSAGE_LENGTH: Final = 17
 MOTOR_MESSAGE_LENGTH: Final = 18
 EBM_MESSAGE_LENGTH: Final = 17
 
+# Protocol ids as the Mahle SDK knows them. The bike answers `$S$P#@` with one
+# of these; the SDK matches the payload as an exact string and picks a whole set
+# of frame parsers from it. Several 20-byte frames share a length but not a
+# layout, so the version - not the length - has to decide.
+PROTOCOL_EBM: Final = "EBM"  # X25 / X35+ (iWoc*); also the fallback when `$S$P#@` times out
+PROTOCOL_V100: Final = "100"
+PROTOCOL_V102: Final = "102"
+PROTOCOL_V200: Final = "200"
+PROTOCOL_V300: Final = "300"
+
+# Numeric ids only; `normalize_protocol_version` matches against this set after
+# stripping the dot some firmwares report ("1.02" -> "102").
+NUMERIC_PROTOCOL_VERSIONS: Final = frozenset(
+    {PROTOCOL_V100, PROTOCOL_V102, PROTOCOL_V200, PROTOCOL_V300}
+)
+
+# Bytes 15-17 of a v100/v102/v300 EBM frame are this fixed marker. v200 puts the
+# slot indicator and the remote's state of charge there instead, which makes the
+# marker a reliable way to tell the two layouts apart before the bike has told us
+# its protocol version.
+EBM_MAHLE_MARKER: Final = b"HIJ"
+
+# Base offsets of the M-Platform device ids a v200 EBM frame reports alongside
+# its error id. The full error code the app shows is base + error id.
+MPLATFORM_DEVICE_BASE_CODES: Final[dict[int, int]] = {
+    0: 0,  # drive unit
+    1: 100,  # head unit
+    2: 200,  # internal battery
+    3: 300,  # external battery
+    4: 400,  # charger
+    5: 500,  # bike radar
+    15: 0,  # none
+}
+
 # Connection settings
 MAX_CONNECT_ATTEMPTS: Final = 3
 BLACKLIST_DURATION: Final = 300  # 5 minutes in seconds
@@ -51,7 +85,14 @@ RESTORE_STATE_KEYS: Final = ("battery_primary", "battery_secondary", "ebm")
 VOLATILE_FIELDS: Final[dict[str, tuple[str, ...]]] = {
     "battery_primary": ("current", "is_charging"),
     "battery_secondary": ("current", "is_charging"),
-    "ebm": ("status", "accel_y", "accel_z"),
+    "ebm": (
+        "status",
+        "error_code",
+        "accel_y",
+        "accel_z",
+        "remote_connected",
+        "remote_soc",
+    ),
 }
 
 # A link that survived at least this long is worth reconnecting immediately when

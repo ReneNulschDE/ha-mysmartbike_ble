@@ -3,6 +3,7 @@ import pytest
 
 from custom_components.mysmartbike_ble.parsers import (
     BikeDataParser,
+    normalize_protocol_version,
     read16,
     read16_signed,
     read24,
@@ -10,6 +11,57 @@ from custom_components.mysmartbike_ble.parsers import (
     read_signed_byte,
     read_unsigned_byte,
 )
+
+
+def parser_for(protocol: str | None) -> BikeDataParser:
+    """Return a parser that has already learned the bike's protocol version."""
+    parser = BikeDataParser()
+    parser.protocol_version = protocol
+    return parser
+
+
+class TestProtocolVersionNormalization:
+    """The version string decides which frame layouts are used."""
+
+    def test_bare_ids_pass_through(self):
+        for value in ("100", "102", "200", "300"):
+            assert normalize_protocol_version(value) == value
+
+    def test_dotted_spelling_folds_onto_the_bare_id(self):
+        """Firmwares report either "1.02" or "102" for the same protocol."""
+        assert normalize_protocol_version("1.02") == "102"
+        assert normalize_protocol_version("1.00") == "100"
+        assert normalize_protocol_version("2.00") == "200"
+        assert normalize_protocol_version("3.00") == "300"
+
+    def test_ebm_is_recognised_case_insensitively(self):
+        assert normalize_protocol_version("EBM") == "EBM"
+        assert normalize_protocol_version("ebm") == "EBM"
+
+    def test_unknown_and_empty_values_yield_none(self):
+        """An unusable version must not pick a layout - the default applies."""
+        assert normalize_protocol_version(None) is None
+        assert normalize_protocol_version("") is None
+        assert normalize_protocol_version("CONF") is None
+        assert normalize_protocol_version("9.99") is None
+
+    def test_assignment_derives_the_layout_id(self):
+        """Restoring the persisted string must select layouts too."""
+        parser = BikeDataParser()
+        assert parser.protocol is None
+
+        parser.protocol_version = "1.02"
+
+        # The raw string is kept verbatim - it is the device's sw_version.
+        assert parser.protocol_version == "1.02"
+        assert parser.protocol == "102"
+
+    def test_parsed_protocol_message_sets_the_layout_id(self):
+        parser = BikeDataParser()
+        parser.handle_message(b"$s$P#200#@")
+
+        assert parser.protocol_version == "200"
+        assert parser.protocol == "200"
 
 
 class TestReadFunctions:
@@ -129,6 +181,28 @@ class TestMotorParser:
         # Temperature at byte 6 = 0x17 = 23°C
         assert result["temperature_celsius"] == 23
 
+    def test_signed_temperature(self):
+        """Byte 6 is signed here too: 0xD8 is -40 °C, not 216 °C."""
+        msg = bytearray(self.MOTOR_MESSAGE)
+        msg[6] = 0xD8
+
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(bytes(msg))
+
+        assert result["temperature_celsius"] == -40
+
+    def test_signed_torque_and_max_torque(self):
+        """Bytes 12 and 15 are signed bytes in the SDK."""
+        msg = bytearray(self.MOTOR_MESSAGE)
+        msg[12] = 0xFF
+        msg[15] = 0xFB
+
+        parser = BikeDataParser()
+        result = parser.parse_motor_message(bytes(msg))
+
+        assert result["torque_motor_pct"] == -1
+        assert result["max_torque_motor_pct"] == -5
+
 
 class TestMotorParserX20:
     """20-byte motor frame parsing (X20 / HUS-prefixed devices)."""
@@ -202,6 +276,71 @@ class TestMotorParserX20:
         assert result["torque_motor_pct"] is None
         assert "motor_power_watts" in result
         assert "rider_power_watts" in result
+
+    def test_v200_and_v300_share_this_layout(self):
+        """Protocols 102, 200 and 300 read the motor frame identically."""
+        results = [
+            parser_for(version).parse_motor_message(self.MOTOR_MESSAGE)
+            for version in ("102", "200", "300")
+        ]
+
+        assert results[0] == results[1] == results[2]
+
+
+class TestMotorParserV100:
+    """20-byte motor frame parsing under protocol 100.
+
+    Same length as the 102/200/300 frame, but bytes 7-8 and 12-13 mean something
+    else entirely - reading them with the newer layout turns 15 A of motor
+    current into 1.5 W of motor power.
+    """
+
+    # assist 1, 22 °C, bytes 7-8 = 0x0096, bytes 12-13 = 0xFF38 (= -200),
+    # power_max 9.0 A, max_torque 0x03FF.
+    MOTOR_MESSAGE = bytes.fromhex("246d245a2301160096000000ff38005a03ff2340")
+
+    def test_bytes_7_8_are_a_current(self):
+        result = parser_for("100").parse_motor_message(self.MOTOR_MESSAGE)
+
+        # 0x0096 = 150 / 10 = 15.0 A
+        assert abs(result["power_amp"] - 15.0) < 0.01
+        assert result["motor_power_watts"] is None
+
+    def test_bytes_12_13_are_a_signed_torque_percentage(self):
+        result = parser_for("100").parse_motor_message(self.MOTOR_MESSAGE)
+
+        # 0xFF38 = -200 signed, / 100 truncated towards zero = -2
+        assert result["torque_motor_pct"] == -2
+        assert result["rider_power_watts"] is None
+
+    def test_shared_fields_are_read_the_same_way(self):
+        result = parser_for("100").parse_motor_message(self.MOTOR_MESSAGE)
+
+        assert result["assist_level"] == 1
+        assert result["temperature_celsius"] == 22
+        assert result["speed_kmh"] == 0.0
+        assert abs(result["power_max_amp"] - 9.0) < 0.01
+        assert result["max_torque_motor_pct"] == 0x03FF
+
+    def test_wheel_speed_is_not_gated_on_max_torque(self):
+        """The newer protocols null the wheel speed when max_torque is 0; v100 doesn't."""
+        msg = bytearray(self.MOTOR_MESSAGE)
+        msg[11] = 0x2A
+        msg[16], msg[17] = 0x00, 0x00
+
+        v100 = parser_for("100").parse_motor_message(bytes(msg))
+        v102 = parser_for("102").parse_motor_message(bytes(msg))
+
+        assert v100["wheel_speed_rpm"] == 42
+        assert v102["wheel_speed_rpm"] is None
+
+    def test_newer_protocols_read_the_same_bytes_differently(self):
+        """Regression: without the version, v100 frames were decoded as v102."""
+        v102 = parser_for("102").parse_motor_message(self.MOTOR_MESSAGE)
+
+        # 0x0096 / 100 as a motor power, 0xFF38 / 10 as the rider's power
+        assert abs(v102["motor_power_watts"] - 1.5) < 0.01
+        assert abs(v102["rider_power_watts"] - 6533.6) < 0.1
 
 
 class TestEbmParserX20:
@@ -306,6 +445,155 @@ class TestEbmParserX20:
         assert result["trip_odometry"] == 8.0  # preserved
         assert abs(result["odometry"] - 13.2) < 0.05
 
+    def test_error_code_equals_the_status_byte(self):
+        """No device id is attached on these protocols, so the code is the id."""
+        msg = bytearray(self.EBM_LIFETIME)
+        msg[11] = 0x2C
+
+        parser = parser_for("102")
+        result = parser.parse_ebm_message(bytes(msg))
+
+        assert result["status"] == 0x2C
+        assert result["error_code"] == 0x2C
+
+    def test_no_remote_fields(self):
+        """The remote's state of charge is a v200 addition."""
+        result = parser_for("102").parse_ebm_message(self.EBM_LIFETIME)
+
+        assert result["remote_connected"] is None
+        assert result["remote_soc"] is None
+
+    def test_v300_matches_v102(self):
+        v102 = parser_for("102").parse_ebm_message(self.EBM_LIFETIME)
+        v300 = parser_for("300").parse_ebm_message(self.EBM_LIFETIME)
+
+        assert v102 == v300
+
+
+class TestEbmParserV200:
+    """20-byte EBM frame parsing under protocol 200.
+
+    Bytes 11-17 carry an M-Platform error id and device id where 100/102/300
+    keep a plain error byte and the accelerometer, which shifts the accelerometer
+    and the slot indicator one byte right and leaves room for the remote's SOC.
+    """
+
+    # Odometer 13.2 km, range 73.7 km, lights off, error id 4 on the internal
+    # battery, accel Z 1 / Y -11, slot 1 (lifetime), no remote paired.
+    EBM_LIFETIME = bytes.fromhex("246a245a2300008402e100242201f501ffff2340")
+    # Same frame with slot 2 (trip A).
+    EBM_TRIP = bytes.fromhex("246a245a2300008402e100242201f502ffff2340")
+
+    def test_message_length(self):
+        assert len(self.EBM_LIFETIME) == 20
+
+    def test_distances_are_read_like_the_other_protocols(self):
+        result = parser_for("200").parse_ebm_message(self.EBM_LIFETIME)
+
+        assert abs(result["odometry"] - 13.2) < 0.05
+        assert abs(result["autonomy"] - 73.7) < 0.05
+
+    def test_lights_flag(self):
+        result = parser_for("200").parse_ebm_message(self.EBM_LIFETIME)
+        assert result["is_light_on"] is False
+
+        msg = bytearray(self.EBM_LIFETIME)
+        msg[10] = 0x01
+        assert parser_for("200").parse_ebm_message(bytes(msg))["is_light_on"] is True
+
+    def test_error_id_is_masked_out_of_byte_11(self):
+        """Only the low five bits of byte 11 are the error id."""
+        result = parser_for("200").parse_ebm_message(self.EBM_LIFETIME)
+
+        # 0x24 & 0x1F = 4
+        assert result["status"] == 4
+
+    def test_error_code_adds_the_device_base_offset(self):
+        """Byte 12's low nibble names the device; the app shows base + id."""
+        result = parser_for("200").parse_ebm_message(self.EBM_LIFETIME)
+
+        # device 2 = internal battery (base 200) + error 4
+        assert result["error_code"] == 204
+
+    def test_error_code_for_the_drive_unit_is_the_bare_id(self):
+        msg = bytearray(self.EBM_LIFETIME)
+        msg[12] = 0x20  # device 0 = drive unit (base 0)
+
+        result = parser_for("200").parse_ebm_message(bytes(msg))
+
+        assert result["error_code"] == 4
+
+    def test_accelerometer_axes_are_one_byte_right(self):
+        result = parser_for("200").parse_ebm_message(self.EBM_LIFETIME)
+
+        # message[13] = 0x01, message[14] = 0xF5 (signed = -11)
+        assert result["accel_z"] == 1
+        assert result["accel_y"] == -11
+
+    def test_slot_indicator_is_at_offset_15(self):
+        """Reading the slot from offset 14 would find an accelerometer axis."""
+        parser = parser_for("200")
+        parser.parse_ebm_message(self.EBM_LIFETIME)
+        prev_odo = parser.state["ebm"]["odometry"]
+
+        msg = bytearray(self.EBM_TRIP)
+        msg[5], msg[6], msg[7] = 0x00, 0x00, 0x50  # trip = 8.0 km
+        result = parser.parse_ebm_message(bytes(msg))
+
+        assert result["trip_odometry"] == 8.0
+        assert result["odometry"] == prev_odo
+
+    def test_no_remote_paired(self):
+        """0xFFFF in bytes 16-17 means no remote is connected."""
+        result = parser_for("200").parse_ebm_message(self.EBM_LIFETIME)
+
+        assert result["remote_connected"] is False
+        assert result["remote_soc"] is None
+
+    def test_remote_state_of_charge(self):
+        msg = bytearray(self.EBM_LIFETIME)
+        msg[16], msg[17] = 0x00, 0x2A
+
+        result = parser_for("200").parse_ebm_message(bytes(msg))
+
+        assert result["remote_connected"] is True
+        assert result["remote_soc"] == 42
+
+    def test_wrong_layout_would_shuffle_lifetime_and_trip(self):
+        """Regression: the v102 layout reads this frame's slot off an accel axis."""
+        wrong = parser_for("102").parse_ebm_message(self.EBM_LIFETIME)
+
+        # byte 14 = 0xF5 != 2, so the v102 layout calls this a lifetime frame,
+        # and it takes byte 11 whole (0x24 = 36) instead of masking it to 4.
+        assert wrong["status"] == 36
+        assert wrong["accel_z"] == 34  # byte 12, the v200 device/flags byte
+
+
+class TestEbmLayoutDetection:
+    """Which 20-byte EBM layout applies before the bike reports its protocol."""
+
+    MAHLE_FRAME = bytes.fromhex("246a245a2300008402e1000001f50148494a2340")
+    V200_FRAME = bytes.fromhex("246a245a2300008402e100242201f501ffff2340")
+
+    def test_hij_marker_selects_the_mahle_layout(self):
+        """Bytes 15-17 are a fixed `HIJ` on 100/102/300 and never on v200."""
+        result = BikeDataParser().parse_ebm_message(self.MAHLE_FRAME)
+
+        assert result["status"] == 0  # byte 11, the v102 error byte
+        assert result["remote_connected"] is None
+
+    def test_missing_marker_selects_the_v200_layout(self):
+        result = BikeDataParser().parse_ebm_message(self.V200_FRAME)
+
+        assert result["error_code"] == 204
+        assert result["remote_connected"] is False
+
+    def test_known_protocol_overrides_the_marker(self):
+        """Once the bike has told us, the version wins over the sniff."""
+        result = parser_for("102").parse_ebm_message(self.MAHLE_FRAME)
+
+        assert result["remote_connected"] is None
+
 
 class TestBatteryParser:
     """Test battery message parsing with real data."""
@@ -345,6 +633,27 @@ class TestBatteryParser:
         assert result is not None
         # Temperature at byte 8 = 0x17 = 23
         assert result["temperature"] == 23
+
+    def test_battery_temperature_is_signed(self):
+        """Byte 8 is signed: a pack below freezing must not read as 246 °C."""
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[8] = 0xF6
+
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(bytes(msg))
+
+        assert result["temperature"] == -10
+
+    def test_battery_current_is_unsigned(self):
+        """The ebikemotion frame is the one layout that does not sign the current."""
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[9], msg[10] = 0xFF, 0xEC
+
+        parser = BikeDataParser()
+        result = parser.parse_battery_message(bytes(msg))
+
+        # 0xFFEC = 65516 / 10; the newer layouts would read this as -2.0 A
+        assert abs(result["current"] - 6551.6) < 0.1
 
     def test_battery_current(self):
         """Test battery current parsing."""
@@ -480,16 +789,107 @@ class TestBatteryParserX20:
 
         assert abs(result["current"] - (-2.0)) < 0.001
 
-    def test_charging_bit_in_soc_byte(self):
-        """When the SOC byte's bit 7 is set, is_charging is True and SOC is masked."""
-        msg = bytearray(self.BATTERY_MESSAGE)
-        msg[7] = 0x80 | 57  # charging flag + 57% SOC
+    def test_soc_byte_is_read_whole(self):
+        """Only v200 puts a charging flag in bit 7; 100/102/300 read the byte whole.
 
-        parser = BikeDataParser()
+        The SDK hardcodes `is_charging` to false for these protocols, so masking
+        bit 7 off here would silently halve an out-of-range reading instead of
+        surfacing it.
+        """
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[7] = 0x80 | 57
+
+        parser = parser_for("102")
         result = parser.parse_battery_message(bytes(msg))
+
+        assert result["soc"] == 0xB9
+        assert result["is_charging"] is False
+
+    def test_v300_uses_the_same_layout_as_v102(self):
+        """v300 is byte-for-byte identical to v102 for every broadcast frame."""
+        v102 = parser_for("102").parse_battery_message(self.BATTERY_MESSAGE)
+        v300 = parser_for("300").parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert v102 == v300
+
+
+class TestBatteryParserV200:
+    """20-byte battery frame parsing under protocol 200."""
+
+    # Same wire bytes as the v102 frame: voltage 37.78 V, SOC 57 %, temp 22 °C,
+    # nominal 352.8 Wh, remaining 200.3 Wh, MOSFET temp 24 °C, battery 1 / 5 cycles.
+    BATTERY_MESSAGE = bytes.fromhex("2462245a230ec2391600000dc807d31827152340")
+
+    def test_shared_fields_match_the_other_protocols(self):
+        """Everything except the SOC byte is read identically."""
+        result = parser_for("200").parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert abs(result["voltage"] - 37.78) < 0.01
+        assert result["temperature"] == 22
+        assert result["temperature_mos"] == 24
+        assert abs(result["nominal_capacity"] - 352.8) < 0.1
+        assert abs(result["remaining_wh"] - 200.3) < 0.1
+        assert result["cycles"] == 5
+
+    def test_charging_bit_in_soc_byte(self):
+        """Bit 7 of the SOC byte is a charging flag, and SOC is masked out of it."""
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[7] = 0x80 | 57  # charging flag + 57 % SOC
+
+        result = parser_for("200").parse_battery_message(bytes(msg))
 
         assert result["is_charging"] is True
         assert result["soc"] == 57
+
+    def test_not_charging_when_bit_clear(self):
+        result = parser_for("200").parse_battery_message(self.BATTERY_MESSAGE)
+
+        assert result["is_charging"] is False
+        assert result["soc"] == 57
+
+    def test_secondary_battery_never_reports_charging(self):
+        """The SDK forces the flag false for the secondary pack."""
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[7] = 0x80 | 57
+        msg[16], msg[17] = 0x4E, 0x25  # 20005 → battery 2, 5 cycles
+
+        parser = parser_for("200")
+        parser.parse_battery_message(bytes(msg))
+
+        assert parser.state["battery_secondary"]["is_charging"] is False
+
+    def test_auxiliary_frame_is_discarded(self):
+        """`battery_number == 0` is an auxiliary current reading, not a pack.
+
+        Storing it would let it overwrite the real primary battery, because
+        anything that is not an explicit secondary battery counts as primary.
+        """
+        primary = bytearray(self.BATTERY_MESSAGE)
+        aux = bytearray(self.BATTERY_MESSAGE)
+        aux[7] = 12  # a wildly different SOC we must not see
+        aux[16], aux[17] = 0x00, 0x05  # 5 → battery number 0
+
+        parser = parser_for("200")
+        parser.parse_battery_message(bytes(primary))
+        result = parser.parse_battery_message(bytes(aux))
+
+        assert result is None
+        assert parser.state["battery_primary"]["soc"] == 57
+
+    def test_auxiliary_frame_is_a_battery_for_the_other_protocols(self):
+        """Only v200 sends auxiliary frames; elsewhere 0 stays the lenient default.
+
+        Single-battery bikes whose firmware leaves the number at zero would
+        otherwise have every battery sensor stuck on unknown.
+        """
+        msg = bytearray(self.BATTERY_MESSAGE)
+        msg[16], msg[17] = 0x00, 0x05
+
+        parser = parser_for("102")
+        result = parser.parse_battery_message(bytes(msg))
+
+        assert result is not None
+        assert parser.state["battery_primary"]["soc"] == 57
 
 
 class TestVinParser:
@@ -611,3 +1011,38 @@ class TestProtocolParser:
         parser.handle_message(self.PROTOCOL_MESSAGE_V102)
 
         assert parser.protocol_version == "1.02"
+
+
+class TestMessageTypeRecognition:
+    """Frames the newer protocols added must not be mistaken for broadcasts."""
+
+    def test_power_source_frames_are_not_batteries(self):
+        """`$b$P` / `$b$R` share the `b` type with the battery broadcast."""
+        parser = BikeDataParser()
+
+        assert parser.recognize_message_type(b"$b$P#1#@") == "power_source"
+        assert parser.recognize_message_type(b"$b$R#1#@") == "power_source_set"
+
+    def test_battery_broadcast_still_recognised(self):
+        parser = BikeDataParser()
+
+        assert parser.recognize_message_type(b"$b$Z#0123456789abc#@") == "battery"
+
+    def test_trio_remote_frames(self):
+        parser = BikeDataParser()
+
+        assert parser.recognize_message_type(b"$f$C#OK#@") == "trio_connect"
+        assert parser.recognize_message_type(b"$f$D#OK#@") == "trio_disconnect"
+
+    def test_map_global_and_blinking_lights(self):
+        parser = BikeDataParser()
+
+        assert parser.recognize_message_type(b"$m$G#0000#@") == "map_global"
+        assert parser.recognize_message_type(b"$s$LFB#1#@") == "blinking_lights"
+
+    def test_new_types_do_not_reach_a_broadcast_parser(self):
+        """handle_message must log them, not feed them to a frame parser."""
+        parser = BikeDataParser()
+        parser.handle_message(b"$b$P#1#@")
+
+        assert parser.state["battery_primary"] is None

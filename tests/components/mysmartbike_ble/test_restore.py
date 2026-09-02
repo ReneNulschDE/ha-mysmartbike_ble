@@ -196,6 +196,34 @@ async def test_restored_vin_populates_device_info(
     assert device.sw_version == "102"
 
 
+async def test_restored_protocol_selects_the_frame_layout(
+    hass: HomeAssistant,
+    hass_storage,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_out_of_range,
+) -> None:
+    """The very first packet after a restart must not be decoded with a guess.
+
+    Several protocols share a frame length but not a layout, so the parser has
+    to know the version before the first notification arrives - which is why
+    `async_restore` runs before the platforms are forwarded.
+    """
+    seed_storage(hass_storage, {**STORED_STATE, "protocol_version": "200"})
+    await setup_offline(hass, restore_config_entry)
+
+    coordinator = restore_config_entry.runtime_data
+    assert coordinator._parser.protocol == "200"
+
+    # A v200 battery frame whose battery number is 0 is an auxiliary reading and
+    # must not overwrite the restored pack.
+    coordinator._notification_handler(
+        0, bytearray.fromhex("2462245a230ec20c1600000dc807d31800052340")
+    )
+
+    assert coordinator.data["battery_primary"]["soc"] == 73
+
+
 async def test_manual_disconnect_survives_restart(
     hass: HomeAssistant,
     hass_storage,
@@ -257,6 +285,48 @@ async def test_state_is_persisted_on_unload(
     assert stored["last_seen"] is not None
     assert "motor" not in stored
     assert "rssi" not in stored
+
+
+async def test_empty_notifications_are_filtered(
+    hass: HomeAssistant,
+    hass_storage,
+    restore_config_entry: MockConfigEntry,
+    mock_bleak_client,
+    mock_device_in_range,
+) -> None:
+    """Zero-length notifications must not reach the parser or wake entities.
+
+    Some links deliver them several times a second. Each one used to log three
+    lines, queue a file write and push a coordinator update through every
+    entity - all for a payload that carries nothing.
+    """
+    restore_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(restore_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    coordinator = restore_config_entry.runtime_data
+    coordinator._last_seen = None
+
+    with patch.object(coordinator, "async_set_updated_data") as mock_update:
+        for _ in range(5):
+            coordinator._notification_handler(0, bytearray())
+        await hass.async_block_till_done()
+
+        mock_update.assert_not_called()
+
+    assert coordinator._empty_notifications == 5
+    # An empty payload says nothing about the bike, so it is not a sighting.
+    assert coordinator._last_seen is None
+    assert coordinator.data["ebm"] is None
+
+    # A real frame still goes through.
+    coordinator._notification_handler(
+        0, bytearray.fromhex("246a245a2300008402e1000001f50148494a2340")
+    )
+    await hass.async_block_till_done()
+
+    assert coordinator._last_seen is not None
+    assert coordinator.data["ebm"]["odometry"] == pytest.approx(13.2, rel=1e-3)
 
 
 async def test_reconnects_when_bike_appears(

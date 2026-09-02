@@ -71,19 +71,14 @@ class MySmartBikeConnectionSwitch(CoordinatorEntity[MySmartBikeCoordinator], Swi
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the switch - request connection to the bike.
 
-        The switch reflects the *wish* to be connected, so it stays on even when
-        the bike is currently unreachable - the coordinator keeps retrying.
+        The switch reflects the *wish* to be connected, so it publishes the new
+        state right away and leaves the retrying to the coordinator. Awaiting the
+        connect attempt here used to leave the toggle looking stuck for up to a
+        minute whenever no connectable adapter could reach the bike; the failure
+        is reported by the coordinator, which also de-duplicates the logging.
         """
-        try:
-            await self.coordinator.async_reconnect()
-        except Exception as ex:
-            error_msg = str(ex).lower()
-            if "not reachable" in error_msg:
-                _LOGGER.warning("Cannot connect - bike not reachable. Will auto-connect when available.")
-            else:
-                _LOGGER.error("Failed to connect to bike: %s", ex)
-        finally:
-            self.async_write_ha_state()
+        self.coordinator.async_request_connect()
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the switch - disconnect from the bike.

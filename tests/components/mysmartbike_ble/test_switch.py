@@ -1,4 +1,5 @@
 """Test the MySmartBike BLE switch."""
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -57,13 +58,11 @@ async def test_switch_turn_off(hass: HomeAssistant, init_integration) -> None:
 
 
 async def test_switch_turn_on(hass: HomeAssistant, init_integration) -> None:
-    """Test turning on the switch reconnects to bike."""
+    """Test turning on the switch requests a connection to the bike."""
     entity_id = get_connection_switch_id(hass)
     coordinator = init_integration.runtime_data
 
-    # Mock the reconnect method
-    with patch.object(coordinator, "async_reconnect", new_callable=AsyncMock) as mock_reconnect:
-        # Turn on the switch
+    with patch.object(coordinator, "async_request_connect") as mock_request:
         await hass.services.async_call(
             SWITCH_DOMAIN,
             "turn_on",
@@ -72,8 +71,7 @@ async def test_switch_turn_on(hass: HomeAssistant, init_integration) -> None:
         )
         await hass.async_block_till_done()
 
-        # Verify reconnect was called
-        mock_reconnect.assert_called_once()
+        mock_request.assert_called_once()
 
 
 async def test_switch_icon(hass: HomeAssistant, init_integration) -> None:
@@ -111,25 +109,110 @@ async def test_switch_turn_off_error_handling(
 async def test_switch_turn_on_error_handling(
     hass: HomeAssistant, init_integration
 ) -> None:
-    """Test error handling when turning on switch fails."""
+    """A failing connect must not take the switch down with it."""
     entity_id = get_connection_switch_id(hass)
     coordinator = init_integration.runtime_data
 
-    # Mock reconnect to raise an exception
+    # Turn off first: that releases the BLE client, so the reconnect does not
+    # sit in `_cleanup_client`'s slot-release sleep while we assert.
+    await hass.services.async_call(
+        SWITCH_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+    await hass.async_block_till_done()
+
     with patch.object(
-        coordinator, "async_reconnect", side_effect=Exception("Reconnect failed")
+        coordinator, "_connect", side_effect=Exception("Connect failed")
     ):
-        # Turn on should not raise, but log error
         await hass.services.async_call(
             SWITCH_DOMAIN,
             "turn_on",
             {ATTR_ENTITY_ID: entity_id},
             blocking=True,
         )
+        await hass.async_block_till_done()
 
-    # Entity should still exist
     state = hass.states.get(entity_id)
     assert state is not None
+    # The wish survives the failure - the coordinator keeps retrying.
+    assert state.state == STATE_ON
+    assert coordinator._manual_disconnect is False
+    # The claim is released, so the next attempt is not blocked.
+    assert coordinator._connecting is False
+
+
+async def test_switch_turn_on_is_immediate(
+    hass: HomeAssistant, init_integration
+) -> None:
+    """The switch must report On without waiting for the connect attempt.
+
+    Regression: `async_turn_on` used to await the whole reconnect before writing
+    its state. On a bike no connectable adapter can reach, that is a full
+    `establish_connection` retry cycle - measured at 47s on a real install - and
+    the toggle looked broken for the entire time.
+    """
+    entity_id = get_connection_switch_id(hass)
+    coordinator = init_integration.runtime_data
+
+    # Turn off first so there is a wish to flip back on.
+    await hass.services.async_call(
+        SWITCH_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_OFF
+
+    connect_started = asyncio.Event()
+    release_connect = asyncio.Event()
+
+    async def hanging_connect() -> None:
+        connect_started.set()
+        await release_connect.wait()
+
+    with patch.object(coordinator, "_connect", side_effect=hanging_connect):
+        await hass.services.async_call(
+            SWITCH_DOMAIN, "turn_on", {ATTR_ENTITY_ID: entity_id}, blocking=True
+        )
+
+        # The connect attempt is still hanging, but the switch already reports On.
+        assert hass.states.get(entity_id).state == STATE_ON
+
+        release_connect.set()
+        await hass.async_block_till_done()
+
+
+async def test_repeated_turn_on_does_not_stack_attempts(
+    hass: HomeAssistant, init_integration
+) -> None:
+    """Impatient toggling must not queue several full retry cycles.
+
+    Each queued attempt runs to completion behind `_connect_lock`, so stacking
+    them made the wait longer rather than shorter.
+    """
+    entity_id = get_connection_switch_id(hass)
+    coordinator = init_integration.runtime_data
+
+    await hass.services.async_call(
+        SWITCH_DOMAIN, "turn_off", {ATTR_ENTITY_ID: entity_id}, blocking=True
+    )
+    await hass.async_block_till_done()
+
+    release_connect = asyncio.Event()
+    calls = 0
+
+    async def hanging_connect() -> None:
+        nonlocal calls
+        calls += 1
+        await release_connect.wait()
+
+    with patch.object(coordinator, "_connect", side_effect=hanging_connect):
+        for _ in range(3):
+            await hass.services.async_call(
+                SWITCH_DOMAIN, "turn_on", {ATTR_ENTITY_ID: entity_id}, blocking=True
+            )
+
+        release_connect.set()
+        await hass.async_block_till_done()
+
+    assert calls == 1
 
 
 async def test_no_auto_reconnect_when_manually_disconnected(
